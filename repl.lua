@@ -1,17 +1,18 @@
 local pprint = require("pprint")
 local ophanim = require("ophanim")
+--local ldbg = require("lua_utils/debugger")
 
 local OState = ophanim.newstate()
 --pprint(OState)
 OState.pprint = pprint
 
-local quote_test = function ()
-    io.write("testing quoting (55):\t")
-    return OState:dispatch(OState.NegI.parse([[ [a:1; b:{;a}; [a:55;b()][] ][] ]])).state
-end
 local contain_test = function ()
     io.write("testing isolation (1):\t")
     return OState:dispatch(OState.NegI.parse([[ [a:1; b:{;a}; (a:55;b())[] ][] ]])).state
+end
+local quote_test = function ()
+    io.write("testing quoting (55):\t")
+    return OState:dispatch(OState.NegI.parse([[ [a:1; b:{;a}; [a:55;b()][] ][] ]])).state
 end
 local grounding_test = function ()
     io.write("testing grounding (1):\t")
@@ -36,9 +37,26 @@ local passing_test = function ()
         f : [
             b : 303;
             a : 9;
-            pass [;r] [r:a,];
+            pass [;r] (r:a,);
             a : 88;
         a];
+        f[]
+    ][] ]])).state
+end
+local factorial_test = function ()
+    io.write("testing factorial (...):\t")
+    return OState:dispatch(OState.NegI.parse([[ [
+        NegI load;
+        f : [
+            ans : 1;
+            i : 2;
+            loop : [
+                ans : ans * 2;
+                i : i + 1;
+                (pass loop, pass loop, [;ans],)[i <> n](ans : ans, i : i, n : n)
+            ];
+            loop (n : 5,)
+        ];
         f[]
     ][] ]])).state
 end
@@ -50,18 +68,19 @@ pprint(grounding_test())
 pprint(labeling_test())
 pprint(swap_test())
 pprint(passing_test())
-print("NegI REPL v0.0.1 (Pre-Alpha)====================================")
+pprint(factorial_test())
+print("NegI REPL v0.0.3 (Pre-Alpha)====================================")
 --print("-- for help write `REPL help`")
 --print("-- for tutorial write `REPL tutorial`")
 
 local running = true
 local rmf = OState.make.Manifest({ -- we describle REPL authority here, instead of using arbitrary commands
         can = {
-            exit = {get = OState.make.Artifact([[return function (self) self.state.stop_repl() end]], "REPL can exit call")},
-            reset = {get = OState.make.Artifact([[return function (self)
+            exit = {get = OState.make.ArtifactCore([[self.state.stop_repl()]], "REPL can exit call")},
+            reset = {get = OState.make.ArtifactCore([[
                 while self.state.repl_layer < FLESH.KES:get_context() do FLESH.KES:pop_layer() end
                 FLESH.KES:push_layer(FLESH.KES:get_context(),true)
-            end]], "REPL can reset get")},
+            ]], "REPL can reset get")},
 --            tutorial = {get = OState.NegI.parse([[ -- Petition is not finished, so it won't work, but that's how Manifest should look like if contructed from NegI side
 --                Petition = env "console" (
 --                
@@ -103,11 +122,11 @@ OState.KES:push_layer(OState.KES:get_context(),true)
 while running do
     io.write(">")
     local input = io.read()
-    local e = OState.NegI.parse(input) or OState.NegI.Manifests.gap
-    e = OState:dispatch(e); e = e or OState.NegI.Manifests.gap -- evaluation
-    e = OState:dispatch(e); e = (e ~= OState.NegI.Manifests.gap) and e or nil -- get
+    local e = OState.NegI.parse(input) or OState.NegI.RootContext.gap
+    e = OState:dispatch(e); e = e or OState.NegI.RootContext.gap -- evaluation
+    e = OState:dispatch(e); e = (e ~= OState.NegI.RootContext.gap) and e or nil -- get
     OState.KES:stage_fill_reserve(e)
-    OState.KES:commit()
+    OState.KES:stage_commit()
     pprint((e or {}).state)
 end
 OState.KES:pop_layer()

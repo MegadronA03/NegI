@@ -10,77 +10,57 @@ return (function ()
     --local ldbg = require("lua_utils/debugger")
     -- This works more or less as ship of thesus, OPHANIM provides common interfaces for other manifests to communicate with each other in platform agnostic way
     local newstate = function () -- something similar to lua_newstate but for OPHANIM
-        local new_conv = function (c, ...) --helps chaining like resolve_chain("salt")(4)(5)(1).r
-            local h = setmetatable({c = c,r = {...}}, {
-                __call = function (self, ...)
-                    return new_conv(c, c(...))
-                end })
-            return h
-        end
         local table_invert = function (t)
             local s={}
-            for k,v in pairs(t) do
-                s[v]=k
-            end
-            return s
-        end
+            for k,v in pairs(t) do s[v]=k end
+            return s end
         local bimap_write = function(bimap, view_key, index, value)
             -- Input validation
             local reverse_key = (view_key):reverse() -- it's fine because code follows this convention
-            if type(bimap) ~= "table" or not view_key or not reverse_key then
-                error("Invalid bimap or keys provided", 2)
-            end
+            if type(bimap) ~= "table" or not view_key or not reverse_key then error("Invalid bimap or keys provided", 2) end
 
             local fwd_view = bimap[view_key]
             local rev_view = bimap[reverse_key]
 
-            if not fwd_view or not rev_view then
-                error("Invalid view keys provided", 2)
-            end
-        
+            if not fwd_view or not rev_view then error("Invalid view keys provided", 2) end
+       
             -- DELETION PATH (value is nil)
             if value == nil then
-                if index == nil then 
-                    error("expected index, got nil", 2) 
-                end
+                if index == nil then error("expected index, got nil", 2) end
 
                 local old_value = fwd_view[index]
                 if old_value ~= nil then
                     fwd_view[index] = nil
                     rev_view[old_value] = nil
                 end
-                return
-            end
-        
+                return end
+       
             -- INSERTION / UPDATE PATH
             -- 1. Clean up any existing mapping for this index
             local old_value = fwd_view[index]
-            if old_value ~= nil then
-                rev_view[old_value] = nil
-            end
-        
+            if old_value ~= nil then rev_view[old_value] = nil end
+       
             -- 2. Clean up any existing mapping for this value (enforce 1-to-1)
             local old_index = rev_view[value]
-            if old_index ~= nil then
-                fwd_view[old_index] = nil
-            end
-        
+            if old_index ~= nil then fwd_view[old_index] = nil end
+       
             -- 3. Write the new mapping
             fwd_view[index] = value
             rev_view[value] = index
         end
-        local FLESH -- forward declaration, because for now I just need to make it work
+        local manifest_reaper = {}
+        local FLESH -- forward declaration
         FLESH = { -- stands for "Fixed Local Environment Shared Handles"
             FISH = { -- "Fixed Internal State Holder" - used by particular manifests to pass around some data. Could be avoided via KES, but those values are quite commonly used, so it will influence performance.
                 -- probably reserved for parser tokens, but I might leave that up to Tokens themselves
             },
             KES = { -- "Knowledge Environment State" (considered finished, until bugs will be found)
-                layers = {{d = 1,h = {r={},i={}},s = {a={},e={},r={}},c = {ob={},bo={}}}}, -- stack of references, string names ready for free (initial layer is preloaded)
-                handles = { -- instead of giving out raw layer depths and introducing use after free bugs, we introduce "addresses" to relevant layers 
+                layers = {{d = 1,h = {r={},i={}},s = {a={},e={},r={}},c = {ob={},bo={}},o = {}}}, -- stack of references, string names ready for free (initial layer is preloaded)
+                handles = { -- instead of giving out raw layer depths and introducing use after free bugs, we introduce "addresses" to relevant layers
                     lh = {},
                     hl = {}},
                 relevance = { -- tracks what currently available in active context
-                    dl = {[1]=1}, -- Array<depth: Integer, layer_id: Integer> 
+                    dl = {[1]=1}, -- Array<depth: Integer, layer_id: Integer>
                     ld = {[1]=1}}, -- Map<layer_id: Integer, depth: Integer> stores which layers are relevent to current context, mostly used as Set<layer_id: Integer>
                 isolations = { -- tracks to which layer unquotation should latch. basically ordered Set<depth: Integer>
                     ["od"] = {}, -- Array<order: Integer, depth: Integer> - we use this to iterate through them
@@ -95,7 +75,7 @@ return (function ()
                 --        print(string.format("WRITE AT: %s on %s, key %s:%s, val %s:%s", c.name or "<ANON>", c.currentline, tostring(k), tostring(type(k)), tostring(v), tostring(type(v))))
                 --    end
                 --),
-                
+               
                 resolve = function (self, ref, framed) -- note that strings are names for indicies, "framed" is used by Frame to get data from current Frame
                     if (type(ref) ~= "string" and type(ref) ~= "number") then
                         error("OPHANIM: FLESH.KES:resolve - invalid argument, expected number or string", 2)
@@ -112,10 +92,10 @@ return (function ()
                     if (#rt.order.ol > #self.relevance.dl) or framed then -- NOTE: records store changes per each layer, so this checks if it's effective to do vertical or horizontal search traversal
                         for d = #self.relevance.dl, framed and #self.relevance.dl or 1, -1 do -- inverse order, because we pick fresh ones, in order to hit early
                             local l = self.relevance.dl[d]
-                            if rt.order.lo[l] then 
+                            if rt.order.lo[l] then
                                 m = rt.records[l] -- we do not use rt.records[e], because it may contain nil, due to "namespace" reservation
                                 fh = (#self.layers == l)
-                            break end 
+                            break end
                         end
                     else
                         for o = #rt.order.ol, 1, -1 do -- inverse order, because we pick fresh ones, in order to hit early
@@ -139,12 +119,12 @@ return (function ()
                         --if (not parent) then error("can't find parent", 2) end
                     end
                     local l = { -- new layer data
-                        d = ((not_root) and parent_depth or 0) + 1, -- new layer depth
+                        d = (not_root) and (parent_depth + 1) or 1, -- new layer depth
                         h = {r={},i={}}, -- those are hidden layers (r - relevance, i - isolation)
                         s = {a={},e={},r={}}, -- staged entries data: aliases(aka refs), entries and reserved aliases
                         c = {ob={},bo={}}, -- `c` is BiMap<order: Integer, bind: Integer> references relvant to this context layer
-                        o = {}} -- owner hashes
-                        
+                        o = {}} -- ownership data Map<handle,reaper> (handle is weak key(TODO: make `o` weak table), reaper is actually ah host function that was defined by Resource)
+
                     --if (#self.relevance.dl > l.d) then
                         for d = #self.relevance.dl, l.d, -1 do -- exclude all layers between parent and new layer depths via depth
                             l.h.r[#l.h.r+1] = self.relevance.dl[d] -- hide layers (we can ask depth from them directly)
@@ -161,12 +141,14 @@ return (function ()
                     if (#self.layers <= 0) then error("FLESH.KES:pop_layer - no layers to pop", 2) end
                     local l = self.layers[#self.layers]--; print("layer: "..tostring(#self.layers))
                     local db = self.bindings
-                    
+                   
                     local frame_state = {labels = {lb={},bl={}}, bindings = {}}
                     local frame_entry = frame and function (self, b, rt)
                         frame_state.bindings[#frame_state.bindings+1] = {delta = rt.records[#self.layers]}
                         bimap_write(frame_state.labels, "bl", #frame_state.bindings, self.labels.bl[b])
                     end or function (self, b, rt) end
+
+                    for h,r in pairs(l.o) do r.state.artifact(h) end -- `res` should 
                     for _,b in ipairs(l.c.ob) do -- removing references from bindings
                         local rt = db[b]
                         frame_entry(self, b, rt)
@@ -182,13 +164,9 @@ return (function ()
                         bimap_write(self.relevance, "ld", e, self.layers[e].d) end
                     for i = #hidden_layers.i, 1, -1 do -- restoring hidden context isolations
                         bimap_write(self.isolations, "od", #self.isolations.od + 1, hidden_layers.i[i]) end
-                    
+
                     self.layers[#self.layers] = nil -- removing layer
-                    return frame and frame_state or nil 
-                end,
-                morph_layer = function (self, parent, isolated, context) -- push_layer, but just rebases current layer. for "pass" use. this is to remove migrate from pop_layer and rework context in push_layer
-                    -- I also not sure if `pass` should keep previous context layer, which this function is implies to do, because `pass` created with explicit data transfer in mind, 
-                    -- leaving something in context is implicit data transfer, which should be another explicit thing on it's own  (like snapshot into frames?)
+                    return frame and frame_state or nil
                 end,
                 unquote_parent = function (self, parent_depth) -- get parent of unquotation
                     local not_root = (#self.relevance.dl > 0)
@@ -208,7 +186,12 @@ return (function ()
                         return self.layers[#self.layers].d
                     end
                 end,
-                get_owner_handle = function (self)  end,
+                has_resource = function (self, handle) return self.layers[#self.layers].o[handle] ~= nil end,
+                own_resource = function (self, handle, reaper) self.layers[#self.layers].o[handle] = reaper end,
+                lift_resource = function (self, handle)
+                    self.layers[#self.layers-1].o[handle] = self.layers[#self.layers].o[handle]
+                    self.layers[#self.layers].o[handle] = nil end,
+                get_owner_handle = function (self) end,
                 get_context = function (self) return #self.layers end, -- will be probably be deprecated
                 get_depth = function (self) return self.layers[#self.layers].d end, -- used by Membranes to memorize context for later use
                 write_entry = function (self, ref, m) -- reference : Number|String, [manifest: Any|Nil]
@@ -265,12 +248,12 @@ return (function ()
                     return #self.layers[#self.layers].s.r > 0
                 end,
                 stage_fill_reserve = function (self, data)
-                    if (data == FLESH.NegI.Manifests.gap) then data = nil end -- somewhat hacky, but good enough for a `gap` check. Native might not like this
+                    if (data == FLESH.NegI.RootContext.gap) then data = nil end -- somewhat hacky, but good enough for a `gap` check. Resource might not like this
                     local stage = self.layers[#self.layers].s
                     for _,i in ipairs(stage.r) do self:stage_entry(data, i) end
                     stage.r = {}
                 end,
-                commit = function (self) -- apply staged changes
+                stage_commit = function (self) -- apply staged changes
                     --print("==== commit ====")
                     --print("\tlayer:"..tostring(#self.layers))
                     --print("\tdepth:"..tostring(self.layers[#self.layers].d))
@@ -345,7 +328,7 @@ return (function ()
                     print("==== KES Integrity Info START ====")
                     for id,layer in pairs(self.layers) do
                         for o,b in ipairs(layer.c.ob) do
-                            if (not db[b]) then print(string.format("missing %s binding (aka %s) at %d depth %d", b, tostring(ls.bl[b] or "<ANON>"), id, layer.d)) 
+                            if (not db[b]) then print(string.format("missing %s binding (aka %s) at %d depth %d", b, tostring(ls.bl[b] or "<ANON>"), id, layer.d))
                             elseif (not db[b].order.lo[id]) then print(string.format("missing layer link of %s binding (aka %s) at %d depth %d", b, tostring(ls.bl[b] or "<ANON>"), id, layer.d)) end
                         end
                     end
@@ -378,33 +361,42 @@ return (function ()
                         error(result, 0) end -- we let the real error crash it
                 end,
                 shift = function(self, closure)
-                    self.closure = closure -- register as a signal
-                    error(closure) -- drop the stack
+                    self.closure = closure -- register as a signal, so pcall won't mastake it for closure
+                    error(closure) -- drop the lua stack
                 end,
             },
+            --local_manifest = false, -- Label resolve optimization?
             do_action = function (self, action, lt, rt) -- make sure to remeber right: clause is case of protocol, action is the manifest about to be executed
-                if not (action and lt) then return self.NegI.Manifests.gap end
+                if not (action and lt) then return self.NegI.RootContext.gap end
                 local r
-                if self:intentcheck(self.NegI.Manifests.Artifact.state, action.protocol) then
+                if self:intentcheck(self.NegI.RootContext.Artifact.state, action.protocol) then
                     return action.state.artifact(lt, rt) else
                     return self:dispatch(action, self.make.Frame({self = lt, arg = rt})) end
-                --return r or self.NegI.Manifests.gap
+                --return r or self.NegI.RootContext.gap
             end,
             dispatch = function (self, lterm, rterm, protocol) -- needs debugging
                 --print("dispatch start")
                 if lterm == nil then error("FLESH:dispatch - got nil, expected Manifest") return end
                 protocol = protocol or lterm.protocol -- protocol argument is optional and here only for convinience, so I don't have to recreate manifest with transformed protocols
                 if protocol and next(protocol) then
+                    if protocol.fork and not self.KES:has_resource(lterm) then -- this is explicit, so I'll leave it like this
+                        lterm = self:do_action(protocol.fork, lterm)
+                        self.KES:own_resource(lterm, manifest_reaper) -- TODO: need to know where to store `free` drivers that are shared by Resources (including the one in make.Manifest)
+                    end
                     if rterm then
                         if protocol.can then -- both "can" and "ask" may not be fulfilled unlike "can" or "get" or abscense of protocol actions
                             --print("can?")
-                            if self:intentcheck(self.NegI.Manifests.Label.state, rterm.protocol) then -- we use direct access, because this stuff will depend on furst record anyways
+                            if self:intentcheck(self.NegI.RootContext.Label.state, rterm.protocol) then -- we use direct access, because this stuff will depend on furst record anyways
                                 --if (not rterm.state) then pprint(rterm) end
+                                --if rterm.state.eager then goto label_eager end -- TODO: eager label protocol or make `()` force call get (force inline?)
                                 local p = protocol.can[rterm.state.name]
-                                if p then return {protocol = p, state = lterm.state} end end end -- if we don't have action, we should fall down to `ask`
+                                if p then return self.make.Manifest(p, lterm.state) end end end -- if we don't have action, we should fall down to `ask`
                         if protocol.ask then -- `ask` action exist solely for cases when Manifest need to handle arbitrary labels, like vector axis swizzling, field "modification" (the field might be abscent) and etc
                             --print("ask?")
-                            if self:intentcheck(self.NegI.Manifests.Label.state, rterm.protocol) then self:do_action(protocol.ask, lterm, rterm) end end
+                            if self:intentcheck(self.NegI.RootContext.Label.state, rterm.protocol) then
+                                --if rterm.state.eager then goto label_eager end
+                                self:do_action(protocol.ask, lterm, rterm) end end
+                        --::label_eager::
                         if protocol.call then
                             --print("call?")
                             if rterm.protocol and rterm.protocol.get then rterm = self:dispatch(rterm, nil) end -- passive evaluation, because caller expect contents
@@ -413,28 +405,22 @@ return (function ()
                             local fabk = self:do_action(protocol.get, lterm)
                             if protocol.wrap then -- wraps the end of negotiation
                                 --print("get and wrap.")
-                                local result
-                                if self:intentcheck(self.NegI.Manifests.Artifact.state, fabk.protocol) then -- Not using ternary, lua likes to execute all code inside expression sometimes
-                                    result = fabk.state.artifact(fabk, rterm) else
-                                    result = self:dispatch(fabk, rterm) end
-                                --local result = self:dispatch(fabk, rterm) -- we have rterm, so we should use it
+                                local result = self:dispatch(fabk, rterm)
                                 self:do_action(protocol.wrap, lterm) -- wrapping up
                                 return result
                             else
                                 --print("get.")
-                                if self:intentcheck(self.NegI.Manifests.Artifact.state, fabk.protocol) then
-                                    return fabk.state.artifact(fabk, rterm) else
-                                    return self:dispatch(fabk, rterm) end
+                                return self:dispatch(fabk, rterm)
                             end
                         else return self.make.Error("OPHANIM: FLESH:dispatch Error: rterm is outside of lterm protocol capability") end
                     elseif protocol.get and not protocol.wrap then -- if we have wrapping, then we handle it with care or something
                         --print("get explicit.")
-                        --if protocol.wrap then -- wraps the end of negotiation
-                        --    --print("... and wrap.")
-                        --    local fabk = self:do_action(protocol.get, lterm)
-                        --    self:do_action(protocol.wrap, lterm) -- wrapping up
-                        --    return fabk
-                        --end
+                        if protocol.wrap then -- wraps the end of negotiation, do not forget about `lift` clause!
+                            --print("... and wrap.")
+                            local fabk = self:do_action(protocol.get, lterm)
+                            self:do_action(protocol.wrap, lterm) -- wrapping up
+                            return fabk
+                        end
                         return self:do_action(protocol.get, lterm)
                     else return lterm end
                 elseif rterm then return self.make.Error("OPHANIM: FLESH:dispatch Error: missing protocol")
@@ -468,11 +454,11 @@ return (function ()
                         if (intent.can and intent.can ~= argp.can) then
                             if argp.can then
                                 for c,a in pairs(intent.can) do
-                                    if argp.can[c] ~= a then 
+                                    if argp.can[c] ~= a then
                                         if argp.can[c] and argp.can[c].get then
-                                            
+                                           
                                         end
-                                        can_matches[c] = a 
+                                        can_matches[c] = a
                                     end -- we stick to simplicity for now
                                 end
                             else
@@ -526,12 +512,12 @@ return (function ()
                     elseif p_template.can and p_checking.can then
                         for i,e in pairs(p_template.can) do -- need deep `can` checks
                             if (p_checking.can[i] ~= e) then
-                                return false end end 
+                                return false end end
                 end end
                 return true
             end,
             --env methods
-            reset = function (self) end, -- inits defaults and other stuff
+            reset = function (self) end, -- inits defaults and other stuff, I have no idea on what it should do because there is already `newstate`
         }
 
         -- Artifact assumptions:
@@ -549,45 +535,49 @@ return (function ()
             for _,e in ipairs(FLESH.make.thunks) do e() end
             FLESH.make.thunks = {} end
         FLESH.make.Manifest = function (protocol, state) -- protocols are still eager, but it's possible to do lazy clause access via "get" manifests (like quoted labels). here we just doing it via metatable because it's convinient, and I'm making a PoC, not final product yet
-            
-            local m = {protocol = protocol, state = state}
-            if type(protocol) == "table" then return m
-            elseif type(protocol) == "function" then
-                local ok, result = pcall(protocol) -- lazy dispatch 
+            local r = (function () -- I don't like to rewrite something that's already works, so we just hook to result
+                local m = {protocol = protocol, state = state}
                 
-                if ok then -- convinence
-                    return {protocol = result, state = state}
-                else
-                    local dummy = {}
-                    local undummy = function ()
-                        setmetatable(dummy,nil)
-                        for k,v in pairs(m) do dummy[k] = v end
-                        dummy.protocol = m.protocol()
-                    end
-                    FLESH.make.thunks[#FLESH.make.thunks+1] = undummy
-                    setmetatable(dummy, { 
-                        __index = function (t,k) -- lazy fetch, becuase some Manifests rely on that
-                            undummy()
-                            return t[k] end,
-                        __newindex = function (t,k,v) undummy(); t[k] = v end,
-                        __len = function () return #m end })
-                    return dummy end
-            else error("protocol expected as function or table, got "..type(protocol), 2) end
+                if type(protocol) == "table" then return m
+                elseif type(protocol) == "function" then
+                    local ok, result = pcall(protocol) -- lazy dispatch
+                
+                    if ok then -- convinence
+                        return {protocol = result, state = state}
+                    else
+                        local dummy = {}
+                        local undummy = function ()
+                            setmetatable(dummy,nil)
+                            for k,v in pairs(m) do dummy[k] = v end
+                            dummy.protocol = m.protocol()
+                        end
+                        FLESH.make.thunks[#FLESH.make.thunks+1] = undummy
+                        setmetatable(dummy, {
+                            __index = function (t,k) -- lazy fetch, becuase some Manifests rely on that
+                                undummy()
+                                return t[k] end,
+                            __newindex = function (t,k,v) undummy(); t[k] = v end,
+                            __len = function () return #m end })
+                        return dummy end
+                else error("protocol expected as function or table, got "..type(protocol), 2) end
+            end)()
+            FLESH.KES:own_resource(r, manifest_reaper) -- lua uses GC, so we can't do anything.
+            return r
         end
 
-        FLESH.NegI = {Manifests = {}} -- the NegI assets
+        FLESH.NegI = {RootContext = {}} -- the NegI assets
 
-        FLESH.NegI.Manifests.Artifact = { -- Artifact for handling external authority
-            protocol = {
+        FLESH.NegI.RootContext.Artifact = FLESH.make.Manifest( -- Artifact for handling external authority
+            {
                 can = {
                     ["in"] = {call = "stub"},
                     ["="] = {can = {source = {call = "stub"}}}}},
-            state = {
+            {
                 can = {
                     reload = {get = "stub"},
                     introspect = {get = "stub"}}, -- can't decide on a name yet, should return ingridients for cooking the authority in question
-                call = "stub"}}
-        
+                call = "stub"})
+       
         local dcopy = function (t)
             -- I need to add function for explicit import/deep copy, because currently it's not sandboxed properly
             return t
@@ -619,7 +609,7 @@ return (function ()
             io = dcopy(io),
             os = dcopy(os),
             package = dcopy(package),
-        
+       
             -- The OPHANIM Substrate
             -- Artifacts MUST use this to interact with the system.
             FLESH = FLESH,
@@ -629,63 +619,73 @@ return (function ()
             ldbg = ldbg,
         }
 
-        FLESH.make.Artifact = function (chunk, chunkname, mode)
+        FLESH.NegI.RootContext.Substrate = FLESH.make.Manifest({},{})
+
+        FLESH.NegI.RootContext.HostContext = FLESH.make.Manifest(FLESH.NegI.RootContext.Substrate.state, artifact_env)
+
+        FLESH.make.ArtifactLL = function (env, a0, a1, body, chunkname)
             chunkname = chunkname or "chunk"
-            local a, e = load(chunk, "OPHANIM:"..chunkname, mode, artifact_env)
+            local chunk = string.format("return function(%s,%s)%s end", a0, a1, body)
+            local a, e = load(chunk, "OPHANIM:"..chunkname, "t", env.state)
             if (e) then
-                local error_p = FLESH.NegI.Manifests.Error
+                local error_p = FLESH.NegI.RootContext.Error
                 if error_p then return FLESH.make.Manifest(
                     error_p.state, {desc = "Artifact: Failed to load "..chunkname.." due to host error: "..e})
                 else print("in ```lua\n"..chunk.."\n```"); error("FLESH.make.Artifact - Artifact construction failed on NegI sys init due to host error:"..tostring(e), 2) end
             end
             local ok, result = pcall(a)
-            local callable_result = (type(a) == "function") or (getmetatable(a).__call)
+            local callable_result = (type(result) == "function") or (getmetatable(result).__call)
             if (not callable_result) then
                 if (not callable_result and ok) then result = "provided code is not callable!" end
-                local error_p = FLESH.NegI.Manifests.Error
+                local error_p = FLESH.NegI.RootContext.Error
                 if error_p then return FLESH.make.Manifest(
                     error_p.state, {desc = "Artifact: Failed to load "..chunkname.." due to host error: "..result})
-                else print("in ```lua\n"..chunk.."\n```"); error("FLESH.make.Artifact - Artifact construction failed on NegI sys init due to host error:"..tostring(e), 2) end
+                else print("in ```lua\n"..chunk.."\n```"); error("FLESH.make.Artifact - Artifact construction failed on NegI sys init due to host error:"..tostring(result), 2) end
             end
-            return FLESH.make.Manifest(FLESH.NegI.Manifests.Artifact.state, {
-                    chunk = chunk,
+            return FLESH.make.Manifest(FLESH.NegI.RootContext.Artifact.state, {
+                    --chunk = chunk,
+                    a0 = a0,
+                    a1 = a1,
+                    body = body,
                     chunkname = chunkname,
-                    mode = mode,
-                    --env = env,
+                    --mode = mode,
+                    env = env, -- Substrate manifest
                     artifact = result})
         end
 
+        FLESH.make.ArtifactCore = function (body, chunkname) return FLESH.make.ArtifactLL(FLESH.NegI.RootContext.HostContext, "self", "arg", body, chunkname) end
+
         --common between protocol manifests
-        local capability_check = FLESH.make.Artifact([[return function (self, arg)
-            return FLESH.make.Number(FLESH:capcheck(self, arg)) end]], "`in` aka capcheck")
-        
-        FLESH.NegI.Manifests.Artifact.protocol.can["in"].call = capability_check
-        FLESH.NegI.Manifests.Artifact.protocol.can["="].can["source"].call = FLESH.make.Artifact([[return function (self, arg)
-            local str_p = FLESH.NegI.Manifests.String
+        local capability_check = FLESH.make.ArtifactCore([[
+            return FLESH.make.Number(FLESH:capcheck(self, arg))]], "`in` aka capcheck")
+       
+        FLESH.NegI.RootContext.Artifact.protocol.can["in"].call = capability_check
+        FLESH.NegI.RootContext.Artifact.protocol.can["="].can["source"].call = FLESH.make.ArtifactCore([[
+            local str_p = FLESH.NegI.RootContext.String
             local authority_recipie = FLESH:capcheck(str_p, arg, (function (m) return m end)) -- I have to hack my way in
             --if (match ~= nil) then FLESH:dispatch(match, nil, match.protocol.can.load) end
             if authority_recipie then
-                return FLESH.make.Artifact(authority_recipie.state, "NegI_Artifact", "t") else
+                return FLESH.make.ArtifactCore(authority_recipie.state, "NegI_Artifact") else
                 return FLESH.make.Error("expected String, got something else") end
-        end]], "Artifact can = can source call")
-        --FLESH.NegI.Manifests.Artifact.protocol.can["="].can["bytecode"].call = FLESH.make.Artifact([[return function (self, arg)
-        --    local str_p = FLESH.NegI.Manifests.String
+        ]], "Artifact can = can source call")
+        --FLESH.NegI.RootContext.Artifact.protocol.can["="].can["bytecode"].call = FLESH.make.ArtifactCore([[
+        --    local str_p = FLESH.NegI.RootContext.String
         --    local authority_recipie = FLESH:capcheck(str_p, arg, (function (m) return m end)) -- I have to hack my way in
         --    --if (match ~= nil) then FLESH:dispatch(match, nil, match.protocol.can.load) end
         --    if authority_recipie then
-        --        return FLESH.make.Artifact(authority_recipie.state, "NegI_Artifact", "b") else
+        --        return FLESH.make.ArtifactCore(authority_recipie.state, "NegI_Artifact") else
         --        return FLESH.make.Error("expected String, got something else") end
-        --end]], "Artifact can = can text call")
-        FLESH.NegI.Manifests.Artifact.state.can.reload.get = FLESH.make.Artifact([[return function (self)
-            return FLESH.make.Artifact(self.state.chunk, self.state.chunkname, self.state.mode, self.state.env) end]], "Artifact can reload")
-        FLESH.NegI.Manifests.Artifact.state.can.introspect.get = FLESH.make.Artifact([[return function (self, arg) end]], "Artifact can intospect")
-        FLESH.NegI.Manifests.Artifact.state.call = FLESH.make.Artifact([[return function(self, arg)
+        --]], "Artifact can = can text call")
+        FLESH.NegI.RootContext.Artifact.state.can.reload.get = FLESH.make.ArtifactCore([[
+            return FLESH.make.Artifact(self.state.chunk, self.state.chunkname, self.state.mode, self.state.env) ]], "Artifact can reload")
+        FLESH.NegI.RootContext.Artifact.state.can.introspect.get = FLESH.make.ArtifactCore([[ ]], "Artifact can intospect")
+        FLESH.NegI.RootContext.Artifact.state.call = FLESH.make.ArtifactCore([[
             print("what the fuck???")
             --ldbg(false)
             return self.state.artifact(
                 FLESH.NegI.Intrinsics.frame_index(arg.state, "self"),
                 FLESH.NegI.Intrinsics.frame_index(arg.state, "arg")
-            ) end]], "Artifact call")
+            ) ]], "Artifact call")
 
         FLESH.make.Frame = function (t)
             -- WARNING: the nested table is interface, but the content of it must be Manifests
@@ -696,252 +696,304 @@ return (function ()
                 s.bindings[#s.bindings+1] = {delta = v} -- we adding data not inheriting data, so there's no parent
                 if type(k) == "string" then -- I don't have plans on introducing numeric keys, because bindings already have these
                     bimap_write(s.labels, "lb", k, #s.bindings) end end
-            return FLESH.make.Manifest(FLESH.NegI.Manifests.Frame.state, s)
+            return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, s)
         end
 
-        FLESH.make.Error = function (desc) return FLESH.make.Manifest(FLESH.NegI.Manifests.Error, {desc = desc}) end -- this one should hold more info than currently it is. Prefereably it should be able to store an Error chain, this will be a common occurence in NegI.
+        FLESH.make.Error = function (desc) return FLESH.make.Manifest(FLESH.NegI.RootContext.Error, {desc = desc}) end -- this one should hold more info than currently it is. Prefereably it should be able to store an Error chain, this will be a common occurence in NegI.
 
         FLESH.make.Number = function (val)
             return (({
-                number = function (num) return FLESH.make.Manifest(FLESH.NegI.Manifests.Number.state, num) end,
-                boolean = function (bool) return bool and FLESH.NegI.Manifests["true"] or FLESH.NegI.Manifests["false"] end 
+                number = function (num) return FLESH.make.Manifest(FLESH.NegI.RootContext.Number.state, num) end,
+                boolean = function (bool) return bool and FLESH.NegI.RootContext["true"] or FLESH.NegI.RootContext["false"] end
             })[type(val)] or (function (val) return FLESH.make.Error("invalid type (rework this error)") end))(val)
         end
 
-        FLESH.make.String = function (val) 
-            return (type(val) == "string") and 
-                FLESH.make.Manifest(FLESH.NegI.Manifests.String.state, val) or 
+        FLESH.make.String = function (val)
+            return (type(val) == "string") and
+                FLESH.make.Manifest(FLESH.NegI.RootContext.String.state, val) or
                 FLESH.make.Error("invalid type (rework this error)")
         end
 
         -- no implicit conversions, this is only between this specific implementation
         local make_trans_op = function (op)
-            return FLESH.make.Artifact([[return function (self, arg)
+            return FLESH.make.ArtifactCore([[
                 if (FLESH:capcheck({state = self.protocol},arg)) then -- 2nd value might have different protocol, I think I'll need to rework this into lua general value protocol check or something.
                     return FLESH:import(self.state ]]..op..[[ arg.state)
                 else
                     return -- Error manifest
                 end
-            end]], op.." operator call")
+            ]], op.." operator call")
         end
         local make_trans = function (trans)
-            return FLESH.make.Artifact([[return function (self)
+            return FLESH.make.ArtifactCore([[
                 return FLESH:import(]]..trans..[[(self.state))
-            end]], trans.." uniarg call")
+            ]], trans.." uniarg call")
         end
         local make_host_res_init = function (host_type)
-            return FLESH.make.Artifact([[return function (self, arg)
+            return FLESH.make.ArtifactCore([[
                 -- wrap host resource manifest
-                if (type(arg) == "]]..host_type..[[") then return {protocol = self.state,state = arg} end
+                if (type(arg) == "]]..host_type..[[") then return FLESH.make.Manifest(self.state, arg) end
                 if (FLESH:capcheck(self,arg)) then return arg end -- literal uses same protocol, so we just wraping
                 return -- Error manifest
-            end]])
+            ]])
         end
 
-        FLESH.NegI.Assets = {
-            Breaker = FLESH.make.Artifact([[return function (self, arg)
-                    FLESH.ESC:shift(function () 
-                        return FLESH:dispatch(self.state, arg)
-                    end)
-                end]], "Breaker transfer"), -- not sure about clause
+        FLESH.NegI.Assets = { -- intermediate manifests that shouldn't be visible to the end user
+            Breaker = FLESH.make.ArtifactCore([[
+                FLESH.ESC:shift(function ()
+                    return FLESH:dispatch(self.state, arg)
+                end)
+            ]], "Breaker"), -- not sure about clause
+            Lift = FLESH.make.ArtifactCore([[FLESH.KES:lift_resource(self.state.handle)]], "Lift") -- res passes the resource handles via temporary Resource manifest
         }
 
         FLESH.NegI.Intrinsics = { -- shared code between Manifests for optimization reasons, because these are tightly coupled anyways
-            frame_index = function (frame_state, query)
+            frame_index = function (frame_state, query, skip_cache)
                 --pprint(frame_state.bindings)
-                if type(query) == "string" then query = frame_state.labels.lb[query] end
+                if type(query) == "string" then 
+                    local label = query
+                    query = frame_state.labels.lb[query] end
                 if type(query) ~= "number" then error("expected number or string", 2) end
-                local binding = frame_state.bindings[query]
-                return binding and (binding.parent and binding.parent[binding.delta] or binding.delta) or nil
+                local value = frame_state.bindings[query] -- TODO: needs rework - I need to keep track of failed attempts (missing breadcrumb of nils)
+                if value then return value[1] end -- [1] stores known search result
+                if frame_state.parent then -- major parent, this points to state, not binding table!
+                    local r = frame_index(frame_state.parent, label, true)
+                    if skip_cache then FLESH.NegI.Intrinsics.frame_setex(frame_state, label, label or query, r) end
+                    return r end
             end,
-            --frame_append = function (frame_state, data)
-            --    frame_state.bindings[#frame_state.bindings+1] = {delta = self.bindings[b].records[#self.layers]}
-            --    if type(self.labels.bl[b]) == "string" then
-            --        bimap_write(frame_state.labels, "bl", #frame_state.bindings, self.labels.bl[b]) end
-            --end,
+            frame_append = function (frame_state, data)
+                frame_state.bindings[#frame_state.bindings+1] = {data}
+                frame_state.length = frame_state.length + 1
+                return #frame_state.bindings
+            end,
+            frame_set = function (frame_state, query, data) -- TODO: add counters for last index and, unique query entries and overall item amount 
+                if type(query) == "string" then
+                    local label = query
+                    query = frame_state.labels.lb[query]
+                    if not query then 
+                        query = FLESH.NegI.Intrinsics.frame_append(frame_state, data)
+                        bimap_write(frame_state.labels, "lb", label, query)
+                        return query end end
+                if type(query) ~= "number" then error("expected number or string at #2 arg", 2) end
+                frame_state.bindings[query] = {data}
+                return query
+            end,
+            frame_setex = function (frame_state, label, binding, data)
+                --if type(label) ~= "string" then error("expected string at #2 arg", 2) end
+                if type(binding) ~= "number" then error("expected number at #3 arg", 2) end
+                if type(label) == "string" then
+                    bimap_write(frame_state.labels, "lb", label, binding) end
+                frame_state.bindings[query] = {data}
+            end,
             the_passer = function (self, arg) return arg end
         }
 
-        FLESH.NegI.Manifests = { -- this is the core shared interface (or "corelib" if you'd like to call it like that), the abstract foundation for any logic that will come next. TODO: I need to move NegI protocols inside of it
-            Native = FLESH.make.Manifest({ -- should represent state during introspection, to make it hostile
+        FLESH.NegI.RootContext = { -- this is the core shared interface (or "corelib" if you'd like to call it like that), the abstract foundation for any logic that will come next. TODO: I need to move NegI protocols inside of it
+            Resource = FLESH.make.Manifest({ -- should represent state during introspection, to make it hostile
                 ["in"] = {call = capability_check}},{
                 can = { -- lua allows importing, but compiled/static languages have a possibility of not working out like that
-                    import = {get = FLESH.make.Artifact("return function (self) return FLESH:import(self.state) end", "Native can import")}}
+                    import = {get = FLESH.make.ArtifactCore("return FLESH:import(self.state)", "Resource can import")}}
+            },{
+               
             }),
-            Artifact = FLESH.NegI.Manifests.Artifact, -- Host authority descriptor, seek definition before this
+            Substrate = FLESH.NegI.RootContext.Substrate,
+            HostContext = FLESH.NegI.RootContext.HostContext,
+            Artifact = FLESH.NegI.RootContext.Artifact, -- Host authority descriptor, seek definition before this
             Error = FLESH.make.Manifest({ -- Error is always as valua
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg)
-                    end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[
+                    ]])}
                 }
             },{
                 can = {
-                    name = {get = FLESH.make.Artifact([[return function (self) end]])}, 
-                    desc = {get = FLESH.make.Artifact([[return function (self)
+                    name = {get = FLESH.make.ArtifactCore([[ ]])},
+                    desc = {get = FLESH.make.ArtifactCore([[
                         return FLESH.make.String(tostring(self.state.desc))
-                    end]])}, 
-                    caller = {get = FLESH.make.Artifact([[return function (self) end]])},
-                    trace = {get = FLESH.make.Artifact([[return function (self) end]])},
+                    ]])},
+                    caller = {get = FLESH.make.ArtifactCore([[ ]])},
+                    trace = {get = FLESH.make.ArtifactCore([[ ]])},
                 },    
             }),
             Token = FLESH.make.Manifest({["in"] = {call = capability_check}},{ -- adds metainfo that's used by `Error`s, so you can read the exact place of where your code failed
                 can = {
                     token = {can = {
-                        root = {get = FLESH.make.Artifact([[return function (self) end]])}, -- references root Token from where it is
-                        parent = {get = FLESH.make.Artifact([[return function (self) end]])}, -- return parent Token (probably won't add this, because I don't store that)
-                        element = {get = FLESH.make.Artifact([[return function (self) end]])}, -- text representation of Token
+                        root = {get = FLESH.make.ArtifactCore([[ ]])}, -- references root Token from where it is
+                        parent = {get = FLESH.make.ArtifactCore([[ ]])}, -- return parent Token (probably won't add this, because I don't store that)
+                        element = {get = FLESH.make.ArtifactCore([[ ]])}, -- text representation of Token
                         id = {get = nil}, -- it's id (probably will remove it)
                         position = {get = nil}, -- position relative to root Token text representation
                         content = {get = nil}, -- return Frame with it's child Tokens (probably won't add this, because I store that in opaque non-uniform states)
                     }}
                 },
-                get = FLESH.make.Artifact([[return function (self) return self.state.token end]]), -- fallback to standard token operation
+                get = FLESH.make.ArtifactCore([[ return self.state.token ]]), -- fallback to standard token operation
             }),
             Manifest = FLESH.make.Manifest({ -- Protocol for directly constructing Manifests
                 can = {
-                    ["in"] = {call = capability_check}, -- capability_check is shared artifact 
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])},
+                    ["in"] = {call = capability_check}, -- capability_check is shared artifact
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])},
                     },
                 },{}),-- thats "any" type, there's nothing to check, because everything is a Manifest
             ManifestMeta = FLESH.make.Manifest({ -- Protocol for Manifest Inspection/Reflection
                 can = {
-                    ["in"] = {call = capability_check}, -- capability_check is shared artifact 
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) return FLESH.make.Manifest(self.state, arg) end]])}, -- we don't need checks, everything is a manifest
+                    ["in"] = {call = capability_check}, -- capability_check is shared artifact
+                    ["="] = {call = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(self.state, arg) ]])}, -- we don't need checks, everything is a manifest
                     },
                 },{
                     can = {
-                        ["=="] = {call = FLESH.make.Artifact([[return function (self, arg) 
-                            return FLESH.make.Number(rawequal(self.state.protocol, arg.protocol) == true) and -- we check protocol and state separately, because table that holds these, don't provide the identity 
+                        ["=="] = {call = FLESH.make.ArtifactCore([[
+                            return FLESH.make.Number(rawequal(self.state.protocol, arg.protocol) == true) and -- we check protocol and state separately, because table that holds these, don't provide the identity
                                 FLESH.make.Number(rawequal(self.state.state, arg.state) == true) -- self.state have arg from `=` with both protocol and state
-                        end]], "ManifestMeta can == call")},
-                        protocol = {get = FLESH.make.Artifact([[return function (self) return FLESH.make.Manifest( FLESH.NegI.Manifests.Protocol.state , self.state.protocol ) end]], "ManifestMeta can protocol get")},
-                        state = {get = FLESH.make.Artifact([[return function (self) return FLESH.make.Manifest(FLESH.NegI.Manifests.Native.state, self.state.state) end]], "ManifestMeta can state get")}, -- it is opaque, so Native it is
-                        back = {get = FLESH.make.Artifact([[return function (self) return self.state end]], "ManifestMeta can back get")}, -- not sure about it
+                        ]], "ManifestMeta can == call")},
+                        protocol = {get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest( FLESH.NegI.RootContext.Protocol.state , self.state.protocol ) ]], "ManifestMeta can protocol get")},
+                        state = {get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(FLESH.NegI.RootContext.Resource.state, self.state.state) ]], "ManifestMeta can state get")}, -- it is opaque, so Resource it is
+                        back = {get = FLESH.make.ArtifactCore([[ return self.state ]], "ManifestMeta can back get")}, -- not sure about it
                     }
                 }),-- that's more like you pulled up an inspection tool, and this tool gives you this
             Protocol = FLESH.make.Manifest({ -- Protocol for new Protocols
                     can = {
-                        of = {call = FLESH.make.Artifact([[return function (self, arg) end]])}, -- will return the protocol of some Manifest that could be used to check other Manifests 
+                        of = {call = FLESH.make.ArtifactCore([[ ]])}, -- will return the protocol of some Manifest that could be used to check other Manifests
                         ["in"] = {call = capability_check}, -- capability_check is shared artifact
-                        ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                        ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                     },
-                    call = FLESH.make.Artifact([[return function (self, arg) end]]), -- artifact for creating new protocol manifests
+                    call = FLESH.make.ArtifactCore([[ ]]), -- artifact for creating new protocol manifests
                 },{
                     ["in"] = capability_check
                 }),
             ["//"] = FLESH.make.Manifest({
-                get = FLESH.make.Artifact("return function (self, arg) return { protocol = { get = FLESH.make.Artifact(\"return function (self, arg) return arg end\")}} end")},{}),
+                get = FLESH.make.ArtifactCore(" return { protocol = { get = FLESH.make.ArtifactCore(\" return arg \")}}")},{}),
             pass = FLESH.make.Manifest({ -- TODO: explicitly ends Sequence with appropriate data. monad where first is to where and 2nd is data
-                call = FLESH.make.Artifact([[return function (self, arg) -- not sure about the clause, so I'll leave it like this
+                call = FLESH.make.ArtifactCore([[ -- not sure about the clause, so I'll leave it like this
                     return FLESH.make.Manifest({call = FLESH.NegI.Assets.Breaker},arg)
-                end]])
+                ]])
             },{}),
-            ["false"] = FLESH.make.Manifest(function () return FLESH.NegI.Manifests.Number.state end,0), -- sugar
-            ["true"] = FLESH.make.Manifest(function () return FLESH.NegI.Manifests.Number.state end,1), -- sugar
+            ["false"] = FLESH.make.Manifest(function () return FLESH.NegI.RootContext.Number.state end,0), -- sugar
+            ["true"] = FLESH.make.Manifest(function () return FLESH.NegI.RootContext.Number.state end,1), -- sugar
             gap = FLESH.make.Manifest({},{}), -- it's fine, that's how it should be
             Number = FLESH.make.Manifest({
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
                     can = {
-                        ["+"] = {call = FLESH.make.Artifact([[return function (self, arg)
-                            local num_p = FLESH.NegI.Manifests.Number
+                        ["+"] = {call = FLESH.make.ArtifactCore([[
+                            local num_p = FLESH.NegI.RootContext.Number
                             return FLESH:capcheck(num_p, arg, (function (match) -- rework as deep intent checks
                                 return FLESH.make.Number(self.state + match.state)
                             end)) or FLESH.make.Error("Number can + call: expected number, got something else")
-                        end]], "Number can + call")},
-                        ["-"] = {call = FLESH.make.Artifact([[return function (self, arg) 
-                            local num_p = FLESH.NegI.Manifests.Number
+                        ]], "Number can + call")},
+                        ["-"] = {call = FLESH.make.ArtifactCore([[
+                            local num_p = FLESH.NegI.RootContext.Number
                             return FLESH:capcheck(num_p, arg, (function (match)
                                 return FLESH.make.Number(self.state - match.state)
                             end)) or FLESH.make.Error("Number can - call: expected number, got something else")
-                        end]], "Number can - call")},
-                        ["*"] = {call = FLESH.make.Artifact([[return function (self, arg) 
-                            local num_p = FLESH.NegI.Manifests.Number
+                        ]], "Number can - call")},
+                        ["*"] = {call = FLESH.make.ArtifactCore([[
+                            local num_p = FLESH.NegI.RootContext.Number
                             return FLESH:capcheck(num_p, arg, (function (match)
                                 return FLESH.make.Number(self.state * match.state)
                             end)) or FLESH.make.Error("Number can * call: expected number, got something else")
-                        end]], "Number can * call")},
-                        ["/"] = {call = FLESH.make.Artifact([[return function (self, arg) 
-                            local num_p = FLESH.NegI.Manifests.Number
+                        ]], "Number can * call")},
+                        ["/"] = {call = FLESH.make.ArtifactCore([[
+                            local num_p = FLESH.NegI.RootContext.Number
                             return FLESH:capcheck(num_p, arg, (function (match)
                                 return FLESH.make.Number(self.state / match.state)
                             end)) or FLESH.make.Error("Number can / call: expected number, got something else")
-                        end]], "Number can / call")},
-                        ["<>"] = {call = FLESH.make.Artifact([[return function (self, arg) 
-                            local num_p = FLESH.NegI.Manifests.Number
+                        ]], "Number can / call")},
+                        ["<>"] = {call = FLESH.make.ArtifactCore([[
+                            local num_p = FLESH.NegI.RootContext.Number
                             return FLESH:capcheck(num_p, arg, (function (match)
                                 return FLESH.make.Number(
-                                    self.state == match.state and 0 or 
+                                    self.state == match.state and 0 or
                                     self.state < match.state and 1 or -1)
                             end)) or FLESH.make.Error("Number can <> call: expected number, got something else")
-                        end]], "Number can <> call")},
+                        ]], "Number can <> call")},
                     },
-                    
+                   
                 }), -- need to make generic host agnostic number representation (maybe even Rational out of 2 BigIntegers or just BigInteger to not conflate these 2 for the compilation process)
             String = FLESH.make.Manifest({
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
                     can = {
-                        length = {get = FLESH.make.Artifact("return function (self, arg) return FLESH.make.Number(#self.state) end")}
+                        length = {get = FLESH.make.ArtifactCore("return FLESH.make.Number(#self.state)")}
                     },
-                    call = FLESH.make.Artifact([[return function (self, arg)
-                        local num_p = FLESH.NegI.Manifests.Number
-                        local frame_p = FLESH.NegI.Manifests.Frame
+                    call = FLESH.make.ArtifactCore([[
+                        local num_p = FLESH.NegI.RootContext.Number
+                        local frame_p = FLESH.NegI.RootContext.Frame
                         if (FLESH:capcheck(num_p, arg)) then
                             return FLESH.make.String(self.state:sub(arg.state,arg.state))
                         elseif (FLESH:capcheck(frame_p, arg)) then -- slicing in python style
                             local s_start = FLESH.NegI.Intrinsics.frame_index(arg.state, "start") or FLESH.NegI.Intrinsics.frame_index(arg.state, 1)
                             local s_end = FLESH.NegI.Intrinsics.frame_index(arg.state, "end") or FLESH.NegI.Intrinsics.frame_index(arg.state, 2)
-                            if (s_start) then if (not FLESH:capcheck(num_p, s_start)) then 
+                            if (s_start) then if (not FLESH:capcheck(num_p, s_start)) then
                                 return FLESH.make.Error("String call: expected number in frame at `start` or 1, got something else")
                             end else
                                 return FLESH.make.Error("String call: expected number in frame at `start` or 1, got something else")
                             end
-                            if (s_end) then if (not FLESH:capcheck(num_p, s_end)) then 
+                            if (s_end) then if (not FLESH:capcheck(num_p, s_end)) then
                                 return FLESH.make.Error("String call: expected number or gap in frame at `end` or 2, got something else")
                             end end
                             return FLESH.make.String(self.state:sub(s_start,s_end or s_start))
                         end
                         return FLESH.make.Error("String call: expected frame or number, got something else")
-                    end]], "String call")
+                    ]], "String call"),
+                    res = FLESH.make.ArtifactCore([[
+
+                    ]])
                 }), -- some hosts might have to emulate this
             Label = FLESH.make.Manifest({ -- it's job is to represent a get query from KES to load manifests
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
                     can = {
                         [":"] = {
-                            get = FLESH.make.Artifact([[return function (self)
+                            get = FLESH.make.ArtifactCore([[
                                 FLESH.KES:stage_alias(self.state.name)
-                                return FLESH.NegI.Manifests.gap end]]),
-                            call = FLESH.make.Artifact([[return function (self, arg)
+                                return FLESH.NegI.RootContext.gap ]]),
+                            call = FLESH.make.ArtifactCore([[
                                 FLESH.KES:stage_alias(self.state.name)
-                                return arg end]])},
-                        ["name"] = {get = FLESH.make.Artifact([[return function (self)
+                                return arg ]])},
+                        name = {get = FLESH.make.ArtifactCore([[
                             return FLESH.make.String(self.state.name)
-                        end]])},
+                        ]], "Label can name get")},
+                        resolve = {get = FLESH.make.ArtifactCore([[
+                            local m, _ = FLESH.KES:resolve(self.state.name)
+                            return m or FLESH.NegI.RootContext.gap
+                        ]], "Label can resolve get")}, -- TODO: I don't like this I want to strip can/ask on demand, this feels hacky
                     },
-                    get = FLESH.make.Artifact([[return function (self) 
+                    get = FLESH.make.ArtifactCore([[
                         local m, _ = FLESH.KES:resolve(self.state.name)
-                        return m or FLESH.NegI.Manifests.gap
-                    end]])
+                        return m or FLESH.NegI.RootContext.gap
+                    ]])
             }),
             Frame = FLESH.make.Manifest({
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
+                    fork = FLESH.make.ArtifactCore([[
+                        local r = FLESH.make.Manifest(self.protocol, {labels = {lb={},bl={}}, bindings = {}})
+                        r.state.parent = self.state
+                        r.state.length = self.state.length
+                        --if r.state.length < 64 then
+                        --    for k,v in pairs(self.state.bindings) do
+                        --
+                        --    end
+                        --end
+                        return r
+                    ]], "Frame fork"),
                     can = {
-                        --["+"] = {call = FLESH.make.Artifact([[return function (self, arg) end]])},
-                        --["*"] = {call = FLESH.make.Artifact([[return function (self, arg) end]])},
-                        --delta = {get = FLESH.make.Artifact([[return function (self) end]])},
-                        load = {get = FLESH.make.Artifact([[return function (self)
+                        ["++"] = {call = FLESH.make.ArtifactCore([[
+                            
+                        ]], "Frame can ++(aka item append)")},
+                        ["+"] = {call = FLESH.make.ArtifactCore([[
+                            
+                        ]], "Frame can +(aka join)")},
+                        --["*"] = {call = FLESH.make.ArtifactCore([[ ]])},
+                        load = {get = FLESH.make.ArtifactCore([[
                             local labels, bindings = self.state.labels, self.state.bindings
                             for b,e in pairs(bindings) do
                                 local sid = FLESH.KES:stage_entry(e.parent and e.parent[e.delta] or e.delta)
@@ -949,181 +1001,582 @@ return (function ()
                                 --print("load: "..(labels.bl[b] or "<anonymic "..b..">"))
                                 if (labels.bl[b]) then FLESH.KES:stage_alias(labels.bl[b], sid) end -- sometimes, user will want to load Frame inside a Frame.
                             end
-                            return FLESH.NegI.Manifests.gap
-                        end]], "Frame can load get")},
-                        ["."] = {ask = FLESH.make.Artifact([[return function (self) --TODO
-                            --self.state.labels
-                        end]])},
-                        map = {call = FLESH.make.Artifact([[return function (self, arg) end]])},
-                        concetrate = {get = FLESH.make.Artifact([[return function (self) end]])},
+                            return FLESH.NegI.RootContext.gap
+                        ]], "Frame can load get")},
+                        ["."] = {ask = FLESH.make.ArtifactCore([[
+                            return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state.name) or FLESH.NegI.RootContext.gap 
+                        ]], "Frame can . ask")},
+                        --["/"] = {call = FLESH.make.ArtifactCore([[
+                        --    --self.state.labels
+                        --]], "Frame can / call")},
+                        map = {call = FLESH.make.ArtifactCore([[ ]])},
+                        concetrate = {get = FLESH.make.ArtifactCore([[ ]])},
                     },
-                    call = FLESH.make.Artifact([[return function (self, arg) 
-                        local num_p = FLESH.NegI.Manifests.Number
-                        local str_p = FLESH.NegI.Manifests.String
+                    call = FLESH.make.ArtifactCore([[
+                        local num_p = FLESH.NegI.RootContext.Number
+                        local str_p = FLESH.NegI.RootContext.String
                         if (FLESH:capcheck(num_p, arg) or FLESH:capcheck(str_p, arg)) then
-                            return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state) or FLESH.NegI.Manifests.gap
+                            return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state) or FLESH.NegI.RootContext.gap
                         elseif (FLESH:capcheck({state = self.protocol}, arg) and arg) then -- slicing in python style
-                            
+                           
                         else
 
                         end
                         return FLESH.make.Error("Frame call: expected string or number, got something else")
-                    end]])
+                    ]], "Frame call") -- indexing with splicing
+            }),
+            FrameLabel = FLESH.make.Manifest({ -- or should this ba a Label extension?
+                
+            },{
+
             }),
             Sequence = FLESH.make.Manifest({
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
                     can = {
-                        prods = {get = FLESH.make.Artifact([[return function (self) end]])}, -- in order to get raw data, @ must be used
-                        creturn = {get = FLESH.make.Artifact([[return function (self) end]])}, -- in order to get raw data, @ must be used
-                        introspect = {get = FLESH.make.Artifact([[return function (self) end]])}
+                        prods = {get = FLESH.make.ArtifactCore([[ ]])}, -- in order to get raw data, @ must be used
+                        creturn = {get = FLESH.make.ArtifactCore([[ ]])}, -- in order to get raw data, @ must be used
+                        introspect = {get = FLESH.make.ArtifactCore([[ ]])}
                     },
-                    call = FLESH.make.Artifact([[return function (self, arg)
+                    call = FLESH.make.ArtifactCore([[
                         local prods = self.state.prods
-                        local frame_p = FLESH.NegI.Manifests.Frame
-                        --local load_cmd = FLESH:dispatch(arg, FLESH.make.Manifest(FLESH.NegI.Manifests.Label.state, {name = "load"}))
+                        local frame_p = FLESH.NegI.RootContext.Frame
+                        --local load_cmd = FLESH:dispatch(arg, FLESH.make.Manifest(FLESH.NegI.RootContext.Label.state, {name = "load"}))
                         --if load_cmd == frame_p.state.can.load then FLESH:dispatch(load_cmd) end -- technically this is a correct way, but it doesn't work for now, so...
                         local match = FLESH:capcheck(frame_p, arg, (function (m) return m end)) -- I have to hack my way in
-                        if (match ~= nil) then FLESH:dispatch(match, nil, match.protocol.can.load) end
-                        return FLESH.ESC:start(nil, (function ()
+                        FLESH.KES:push_layer(self.state.ldepth, self.state.isolate)
+                        if (match ~= nil) then 
+                            FLESH:dispatch(match, nil, match.protocol.can.load)
+                            FLESH.KES:stage_commit() end
+                        local r = FLESH.ESC:start(nil, (function ()
                         for i,e in ipairs(prods) do
-                            e = e or FLESH.NegI.Manifests.gap
-                            e = FLESH:dispatch(e); e = e or FLESH.NegI.Manifests.gap -- evaluation
+                            e = e or FLESH.NegI.RootContext.gap
+                            e = FLESH:dispatch(e); e = e or FLESH.NegI.RootContext.gap -- evaluation
                             e = FLESH:dispatch(e) -- get
                             FLESH.KES:stage_fill_reserve(e)
-                            FLESH.KES:commit() end
-                        return self.state.creturn and FLESH.ESC:start(nil, FLESH.dispatch, FLESH, self.state.creturn) or FLESH.NegI.Manifests.gap
+                            FLESH.KES:stage_commit() end
+                        return self.state.creturn and FLESH:dispatch(self.state.creturn) -- I made sure that parser now gives AST.GAP, instead of nil, so if we get an error, it won't be because of parser
                         end))
-                    end]], "Sequence call")
-            }),
-            Membrane = FLESH.make.Manifest({ -- represent the layers and how they affect environment
-                can = {
-                    ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
-                }
-            },{ -- KES should track layer versions
-                get = FLESH.make.Artifact([[return function (self)
-                    local d = (self.state.parent > FLESH.KES:get_depth()) and FLESH.KES:get_depth() or self.state.parent
-                    d = self.state.quoted and FLESH.KES:unquote_parent(d) or d
-                    FLESH.KES:push_layer(d, self.state.contain)
-                    return self.state.content or FLESH.NegI.Manifests.gap
-                end]], "Membrane wrap enter"),
-                wrap = FLESH.make.Artifact([[return function (self) FLESH.KES:pop_layer() end]], "Membrane wrap exit")
-                
-            }), -- I think I should make distinction between Membranes, though parent Manifest with inherited capabilities will be here
-            Make = FLESH.make.Manifest({ -- aka [] or grounded (because push_layer will be grounded by default)
-                can = {
-                    ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
-                }
-            },{
-                get = FLESH.make.Artifact([[return function (self)
-                    if self.state then
-                        local d = FLESH.KES:get_depth()
-                        FLESH.KES:push_layer(d)
-                        local e = FLESH:dispatch(self.state)
-                        FLESH.KES:pop_layer()
-                        return FLESH.make.Manifest(FLESH.NegI.Manifests.Membrane.state, {
-                            parent = d,
-                            contain = false,
-                            quoted = false,
-                            content = e})
-                    else return FLESH.NegI.Manifests.gap end
-                end]], "Make get")
+                        if r then
+                            FLESH.KES:lift_resource(r) -- we promote this manifest first
+                            local res = r.protocol and r.protocol.res or nil
+                            if res then FLESH:do_action(res, r, FLESH.NegI.Assets.Lift) end -- then we lookup for `r`s dependencies, just to move them together
+                            FLESH.KES:pop_layer() 
+                            local lift = r.protocol and r.protocol.lift or nil
+                            if lift then FLESH:do_action(lift, r) end -- we tell manifest that it was lifted
+                        else FLESH.KES:pop_layer() end
+                        return r or FLESH.NegI.RootContext.gap
+                    ]], "Sequence call"),
+                    lift = FLESH.make.ArtifactCore([[ self.state.ldepth = math.min(self.state.ldepth, FLESH.KES:get_depth()) ]], "Sequnece lift")
             }),
             Quote = FLESH.make.Manifest({ -- aka {} or dynamic (because it will shift parent within isolation)
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }
-            },{
-                get = FLESH.make.Artifact([[return function (self)
-                    return FLESH.make.Manifest(FLESH.NegI.Manifests.Membrane.state, {
-                        parent = FLESH.KES:get_depth(),
-                        contain = false,
-                        quoted = true,
-                        content = self.state})
-                end]], "Quote get")
-            }),
-            Contain = FLESH.make.Manifest({ -- aka () or isolated
-                can = {
-                    ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
-                }
-            },{
-                get = FLESH.make.Artifact([[return function (self)
-                    if self.state then
-                        local d = FLESH.KES:get_depth()
-                        FLESH.KES:push_layer(d, true)
-                        local e = FLESH:dispatch(self.state)
-                        FLESH.KES:pop_layer()
-                        return FLESH.make.Manifest(FLESH.NegI.Manifests.Membrane.state, {
-                            parent = d,
-                            contain = true,
-                            quoted = false,
-                            content = e})
-                    else return FLESH.NegI.Manifests.gap end
-                end]], "Contain get")
+            },{ -- KES should track layer versions
+                get = FLESH.make.ArtifactCore([[
+                    local d = (self.state.parent > FLESH.KES:get_depth()) and FLESH.KES:get_depth() or self.state.parent
+                    d = FLESH.KES:unquote_parent(d)
+                    FLESH.KES:push_layer(d, self.state.contain)
+                    return self.state.content or FLESH.NegI.RootContext.gap
+                ]], "Quote get"),
+                wrap = FLESH.make.ArtifactCore([[ FLESH.KES:pop_layer() ]], "Quote wrap"),
+                lift = FLESH.make.ArtifactCore([[ self.state.parent = math.min(self.state.parent, FLESH.KES:get_depth()) ]], "Quote lift")
             }),
             Negotiation = FLESH.make.Manifest({ -- aka jusxtaposition
                 can = {
                     ["in"] = {call = capability_check},
-                    ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
-                    get = FLESH.make.Artifact([[return function (self)
+                    get = FLESH.make.ArtifactCore([[
                         -- resolve terms: we hold references in state, not data
                         local lt = self.state.lterm
-                        local rt = self.state.rterm or FLESH.NegI.Manifests.gap
+                        local rt = self.state.rterm or FLESH.NegI.RootContext.gap
 
-                        return FLESH:dispatch(lt, rt) or FLESH.NegI.Manifests.gap
-                    end]], "Negotiation get")
+                        return FLESH:dispatch(lt, rt) or FLESH.NegI.RootContext.gap
+                    ]], "Negotiation get")
             }),
             Function = FLESH.make.Manifest({},{}),
             Structure = FLESH.make.Manifest({},{}),
             context = FLESH.make.Manifest({
                 can = {
-                    inner = {get = FLESH.make.Artifact([[return function (self) return FLESH.make.Manifest(FLESH.NegI.Manifests.Frame.state, FLESH.KES:inner_snapshot()) end]])},
-                    outer = {get = FLESH.make.Artifact([[return function (self) return FLESH.make.Manifest(FLESH.NegI.Manifests.Frame.state, FLESH.KES:view_snapshot(true)) end]])},
-                    full = {get = FLESH.make.Artifact([[return function (self) return FLESH.make.Manifest(FLESH.NegI.Manifests.Frame.state, FLESH.KES:view_snapshot(false)) end]])},
+                    inner = {
+                        can = {
+                            has = {ask = FLESH.make.ArtifactCore([[
+                                return FLESH.KES:has_resource(arg.name) and FLESH.NegI.RootContext["true"] or FLESH.NegI.RootContext["false"]
+                            ]], "context can inner can has call")}},
+                        get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, FLESH.KES:inner_snapshot()) ]], "context can inner get")},
+                    outer = {get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, FLESH.KES:view_snapshot(true)) ]], "context can outer get")},
+                    full = {get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, FLESH.KES:view_snapshot()) ]], "context can full get")},
                 }
-            },{}), 
+            },{}),
+            -- TODO: in order to finish Parser, Depictor, Mount, Gate: I need to finish Frame and Mold first
             Parser = FLESH.make.Manifest({
-                ["in"] = {call = capability_check},
-                ["="] = {call = FLESH.make.Artifact([[return function (self, arg) end]])} -- make one given the list of Manifest nodes
+                can = {
+                    ["in"] = {call = capability_check},
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])} -- make one given the list of Manifest nodes
+                }
             },{
                 can = {
-                    nodes = {get = FLESH.make.Artifact([[return function (self) end]])} -- get Frame with responsible manifests
+                    nodes = {get = FLESH.make.ArtifactCore([[ ]])} -- get Frame with responsible manifests
                 },
-                call = FLESH.make.Artifact([[return function (self, arg) end]]) -- evaluate
+                call = FLESH.make.ArtifactCore([[ ]]) -- parse and return installer object (due to multithreading, we need to link the namespaces of parsed object and existing runtime)
             }),
-            Petition = FLESH.make.Manifest({ -- external persistent resource request, could be a filepath or uri. not sure about the name: Exogen, Petition, Conduit, Vestige
-                ["in"] = {call = capability_check},
-                ["="] = {
-                    can = {
-                        filesys = {call = FLESH.make.Artifact([[return function (self, arg) end]])},
-                        env = {call = FLESH.make.Artifact([[return function (self, arg) end]])}
-                    },
-                    call = FLESH.make.Artifact([[return function (self, arg) end]])} -- should be created from query and expected protocol
+            Depictor = FLESH.make.Manifest({
+                can = {
+                    ["in"] = {call = capability_check},
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])} -- make one given the list of Manifest nodes
+                }
             },{
-                call = FLESH.make.Artifact([[return function (self, arg)
-                    
-                end]]) -- gives the resource during callback execution
+                can = {
+                    depictions = {get = FLESH.make.ArtifactCore([[ ]])} -- get Frame with depictions
+                },
+                call = FLESH.make.ArtifactCore([[ ]])
             }),
-            --Exogen = FLESH.make.Manifest({ -- interface for external resource (Device, File, Network and etc)
-            --    ["in"] = {call = capability_check},
-            --},{
-            --    drop = FLESH.make.Artifact([[return function (self) end]])
-            --})
+            Mount = FLESH.make.Manifest({
+                can = {
+                    ["in"] = {call = capability_check},
+                    ["="] = {call = FLESH.make.ArtifactCore([[
+                       
+                    ]], "Mount can = call")},
+                },
+                call = FLESH.make.ArtifactCore([[
+                    -- here we expect frame with driver
+                ]], "Mount call")
+            },{
+                can = {
+                    -- should I just make another can case that contain all those different options for path building?
+                    ["^"] = {get = FLESH.make.ArtifactCore([[
+                        local lsub = FLESH.make.Manifest(self.protocol, {driver = self.state.driver})
+                        for i,e in ipairs(self.state.path) do lsub.state.path[i] = e end
+                        lsub.state.path[#lsub.state.path] = nil
+                        return lsub
+                    ]])},
+                    ["."] = {ask = FLESH.make.ArtifactCore([[
+                        local lsub = FLESH.make.Manifest(self.protocol, {driver = self.state.driver})
+                        for i,e in ipairs(self.state.path) do lsub.state.path[i] = e end
+                        lsub.state.path[#lsub.state.path+1] = arg.state.name
+                        return lsub
+                    ]], "Mount can . ask")},
+                    ["/"] = {call = FLESH.make.ArtifactCore([[
+                        local str_p = FLESH.NegI.RootContext.String
+                        local match = FLESH:capcheck(str_p, arg, (function (m) return m end))
+                        if (match == nil) then return FLESH.make.Error("Expected string, got something else") end
 
-             -- I need to understand how should I make it, so the user can modify the axioms it uses 
+                        local lsub = FLESH.make.Manifest(self.protocol, {driver = self.state.driver})
+
+                        --if (arg.state == "..") then
+                        --    -- go up the directory
+                        --    return FLESH.make.Manifest(self.protocol, nsta)
+                        --end
+
+                        for i,e in ipairs(self.state.path) do lsub.state.path[i] = e end
+                        lsub.state.path[#lsub.state.path+1] = arg.state
+                        return lsub
+                    ]], "Mount can / call")},
+                    meta = {},
+                    pull = {get = FLESH.make.ArtifactCore([[
+                        return FLESH:do_action(self.state.driver.pull, self)
+                    ]])},
+                    push = {call = FLESH.make.ArtifactCore([[
+                        local str_p = FLESH.NegI.RootContext.String
+                        local match = FLESH:capcheck(str_p, arg, (function (m) return m end))
+                        if (match == nil) then return FLESH.make.Error("Expected string, got something else") end
+
+                        return FLESH:do_action(self.state.driver.push, self, arg)
+                    ]])},
+                }
+            }),
+            --mount_virtual = FLESH.make.Frame({ -- virtual storage mount driver
+            --    pull = FLESH.make.ArtifactCore([[
+            --        
+            --    ]]),
+            --    push = FLESH.make.ArtifactCore([[
+            --        
+            --    ]]),
+            --}),
+            manifest_reaper = FLESH.make.ArtifactCore([[]], "Manifest reaper"),
         }
-        FLESH.make.unthunk()
+ 
+        manifest_reaper.protocol = FLESH.NegI.RootContext.manifest_reaper.protocol
+        manifest_reaper.state = FLESH.NegI.RootContext.manifest_reaper.state
+
+        FLESH.NegI.parse = (function ()
+            -- Parser assets and constants
+            local TOKENTYPE = { -- enumeration for tokenizer
+                NUMBER = 0,
+                STRING = 1,
+                LABEL = 2,
+                MEMBRANE_OPEN = 3,
+                MEMBRANE_CLOSE = 4,
+                FINISH_ELEMENT = 5,
+                FINISH_ACTION = 6
+            }
+
+            local tokenname = table_invert(TOKENTYPE)
+
+            local AST_METADATA = function (node, pos)
+                return FLESH.make.Manifest(FLESH.NegI.Token.state,{})
+            end
+
+            local framecr_p = {get = FLESH.make.ArtifactCore([[
+                            local items = self.state.items
+                            local labels = table.create and {lb=table.create(0,#items),bl=table.create(0,#items)} or {lb={},bl={}}
+                            for i,e in ipairs(items) do
+                                local ststs = FLESH.KES:stage_staged() -- we need to check if there is a `load`, couldn't come up with a better way
+                                e = FLESH:dispatch(e); e = e or FLESH.NegI.RootContext.gap -- evaluate
+                                e = FLESH:dispatch(e) -- get
+                                if FLESH.KES:stage_reserved() then
+                                    FLESH.KES:stage_fill_reserve(e) else
+                                    if ststs == FLESH.KES:stage_staged() then FLESH.KES:stage_entry(e) end end end
+                           
+                            local f = FLESH.make.Manifest(
+                                FLESH.NegI.RootContext.Frame.state,
+                                FLESH.KES:stage_snapshot())
+                            if (self.state.capture) then FLESH.KES:stage_clear() end
+                            return f
+                        ]], "FrameCreate get")}
+
+            local seqcr_p = {get = FLESH.make.ArtifactCore([[
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Sequence.state, {
+                        prods = self.state.prods,
+                        creturn = self.state.creturn,
+                        isolate = self.state.isolate,
+                        ldepth = FLESH.KES:get_depth()
+                    })
+                ]], "SequenceCreate get")}
+
+            local quotecr_p = {get = FLESH.make.ArtifactCore([[
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Quote.state, {
+                        parent = FLESH.KES:get_depth(),
+                        contain = self.state.isolate,
+                        quoted = true,
+                        content = self.state.content})
+                ]], "QuoteCreate get")}
+
+            -- Internal AST node creators (for parser output, I should also softcode this for evaluation reinterpretation)
+            local AST = { -- refactoring the Sequence generator for parser
+                GAP = function ()
+                    --print("e_gap")
+                    return FLESH.NegI.RootContext.gap -- we don't have anything on here
+                end,
+                NUMBER = function (value)
+                    --print("e_number")
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Number.state, value) end,
+                STRING = function (value)
+                    --print("e_string")
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.String.state, value) end,
+                LABEL = function (name)
+                    --print("e_label")
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Label.state, {name = name, eager = false}) end,
+                FRAME = function (items) -- this one isn't a frame, but a frame constructor, that creates environment for writing, like Sequence
+                    --print("e_frame")
+                    return FLESH.make.Manifest(framecr_p, {items = items, capture = false}) end,
+                SEQUENCE = function (prods, creturn) -- Sequence holds quoted stuff, but we still doing initialization, because Sequence need to know it's ground
+                    --print("e_sequence")
+                    return FLESH.make.Manifest(seqcr_p, {prods = prods, creturn = creturn, isolate = false}) end,
+                QUOTE = function (content)
+                    --print("e_quote")
+                    return FLESH.make.Manifest(quotecr_p, {content = content, isolate = false}) end,
+                NEGOTIATION = function (lterm, rterm) -- evaluation units
+                    --print("e_negotiation")
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Negotiation.state, {lterm = lterm, rterm = rterm}) end,
+            }
+
+            -- Internal: Recursive descent parsers (one per non-terminal)
+            local parse_term, parse_negotiation, parse_product, parse_sequence
+
+            parse_term = function(tokens, pos)
+                local tok
+                if pos <= #tokens then
+                    tok = tokens[pos]
+                    if tok.type == TOKENTYPE.MEMBRANE_OPEN then -- handle membrane: contain | quote | make
+                        local kind = tok.value
+                        local seq, pos = parse_sequence(tokens, pos + 1)
+                        local concl = tokens[pos]
+                        if (concl == nil) then -- TODO: make this mess unified, there are a lot of repetition
+                            error(
+                                "parse_term ERROR: Expected membrane_close '"..
+                                string.sub("]})",tok.value,tok.value)..
+                                "', but got nothing. Membrane begins "..
+                                " at line:"..tostring(tok.at.line)..
+                                ", char:"..tostring(tok.at.char), 2)
+                        elseif (concl.type ~= TOKENTYPE.MEMBRANE_CLOSE) then
+                            error(
+                                "parse_term ERROR: Expected membrane_close for some reason (probably parser bug, because it's implicitly checked), but got '"..
+                                tokenname[concl.type]..
+                                "' at line:"..tostring(concl.at.line)..
+                                ", char:"..tostring(concl.at.char), 2)
+                        elseif (concl.value ~= kind) then
+                            error(
+                                "parse_term ERROR: Bracket missmatch. Forgot to open with '"..
+                                string.sub("[{(",concl.value,concl.value)..
+                                "' membrane? Expected this membrane to close with '"..
+                                string.sub("]})",tok.value,tok.value)..
+                                "' at line:"..tostring(concl.at.line)..
+                                ", char:"..tostring(concl.at.char), 2)
+                        end
+                        if (seq == nil) then seq = AST.GAP() end -- state "nothingness" explicitly
+                        ({
+                            function () end,
+                            function () seq = AST.QUOTE(seq) end,
+                            function ()
+                                if (seq.protocol == seqcr_p) then seq.state.isolate = true
+                                elseif (seq.protocol == quotecr_p) then seq.state.isolate = true
+                                elseif (seq.protocol == framecr_p) then seq.state.capture = true end
+                                --elseif (seq.protocol == FLESH.NegI.RootContext.Label.state) then seq.state.eager = true end -- this needs more general way, not just this
+                            end
+                        })[kind]()
+                        return seq, pos + 1
+                        --return AST.QUOTE(seq), pos + 1
+                    elseif tok.type == TOKENTYPE.NUMBER then -- handle NUMBER
+                        return AST.NUMBER(tok.value), pos + 1
+                    elseif tok.type == TOKENTYPE.STRING then -- handle ESCAPED_STRING
+                        return AST.STRING(tok.value), pos + 1
+                    elseif tok.type == TOKENTYPE.LABEL then -- handle label
+                        return AST.LABEL(tok.value), pos + 1
+                    elseif -- handle gap
+                        -- the code below generates ast_gap, to help tracking gaps inside sequences or frames
+                        -- we can throw gap only if expeted term terminated by one of those 2 tokens
+                        tok.type == TOKENTYPE.FINISH_ELEMENT or
+                        tok.type == TOKENTYPE.FINISH_ACTION then
+                        return AST.GAP(), pos
+                    end
+                end
+                -- this could happen in cases like `blabla;` where after `;` there's eof or membrane_close
+                -- this means that there's nothing we can use to create term, but higher parse expects something
+                return nil, pos -- so while we're at it, we just tell higher up that no valid term found
+            end
+
+            parse_negotiation = function(tokens, pos) -- handle negotiation: term term //left associative. yau can think of it as left accumulates everything on the right ((term term) term)
+                local term, pos = parse_term(tokens, pos)
+               
+                if (term == nil) then return nil, pos end
+
+                local tok = tokens[pos] -- slight optimization
+                local node = term
+                while
+                    tok and (
+                    tok.type == TOKENTYPE.MEMBRANE_OPEN or
+                    tok.type == TOKENTYPE.NUMBER or
+                    tok.type == TOKENTYPE.STRING or
+                    tok.type == TOKENTYPE.LABEL) do -- Check if next token is a term (not a delimiter)
+                    term, pos = parse_term(tokens, pos) -- previous check guarantees that parse_term won't return (nil, pos)
+                    tok = tokens[pos] -- we update tok
+                    node = AST.NEGOTIATION(node, term) -- Keep nesting leftwards
+                end
+                return node, pos
+            end
+
+            local check_token = function (tok, tt)
+                return (tok ~= nil) and tok.type == tt
+            end
+
+            parse_product = function(tokens, pos) -- handle ?product: frame | term
+                local term, pos = parse_negotiation(tokens, pos)
+               
+                if check_token(tokens[pos], TOKENTYPE.FINISH_ELEMENT) then -- it's a frame
+                    -- there must be comma, but trailing one is optional.
+                    -- meaning (5,) must be valid frame with 1 element,
+                    -- while (5) is just the element
+                    local items = {term}
+                    repeat
+                        term, pos = parse_negotiation(tokens, pos + 1)
+                        if term then -- for the sake of trailing comma, there might be nil
+                            table.insert(items, term)
+                        end
+                    until not check_token(tokens[pos], TOKENTYPE.FINISH_ELEMENT)
+                    return AST.FRAME(items), pos
+                else -- it's not a frame
+                    return term, pos -- could return (nil, pos) from parse_term and thats fine
+                end
+            end
+
+            parse_sequence = function(tokens, pos) -- handle ?sequence: (product ";")* [creturn]
+                local term, pos = parse_product(tokens, pos)
+               
+                -- we could have no sequence at all, so first thing we check if there is sequence
+                if check_token(tokens[pos], TOKENTYPE.FINISH_ACTION) then -- it's a sequence
+                    -- there must be semicolon, but trailing one sets creturn to nil.
+                    -- meaning (5;) must be valid sequence with 1 element,
+                    -- while (5) is just the element,
+                    -- but if it's (5;5), last element conidered as return value on membrane finish
+                    local prod = {}
+                    local ret = term
+                    repeat
+                        table.insert(prod, ret)
+                        ret = nil
+                        term, pos = parse_product(tokens, pos + 1)
+                        if term then -- sometimes there might be not vaild term after semicolon
+                            ret = term
+                        end
+                    until not check_token(tokens[pos], TOKENTYPE.FINISH_ACTION)
+                    return AST.SEQUENCE(prod, ret or AST.GAP()), pos
+                else -- it's not a sequence
+                    return term, pos -- could return (nil, pos) from parse_term and thats fine
+                end
+            end
+
+            local tokenize = function(code)
+                local tokens = {}
+                local i = 1
+                local line = 1
+                local choff = 0
+                while i <= #code do
+                    local c = code:sub(i, i)
+                    if c:match("%s") then  -- Skip whitespace
+                        if c == "\n" then
+                            line = line + 1
+                            choff = i
+                        end
+                        i = i + 1
+                    --elseif c == "0" and code:sub(i+1,i+1):lower() == "x" then -- Number Hex (syntax sugar. Removed in favour of Ada/Smalltalk style "can" keys)
+                    --    local hex = code:match("^0x%x+", i)
+                    --    table.insert(tokens, {type = TOKENTYPE.NUMBER, value = tonumber(hex), at = {char = i - choff, line = line}})
+                    --    i = i + #hex
+                    --elseif c == "0" and code:sub(i+1,i+1):lower() == "b" then -- Number Binary
+                    --    local bin = code:match("^0b[01]+", i)
+                    --    local val = tonumber(bin:sub(3), 2)
+                    --    table.insert(tokens, {type = TOKENTYPE.NUMBER, value = val, at = {char = i - choff, line = line}})
+                    --    i = i + #bin
+                    elseif c:match("%d") then -- Number Scientific/Basic
+                        local num = code:match("^%d+%.?%d*[eE][+-]?%d+", i) or
+                                    code:match("^%d+%.?%d*", i)
+                        table.insert(tokens, {type = TOKENTYPE.NUMBER, value = tonumber(num), at = {char = i - choff, line = line}})
+                        i = i + #num
+                    elseif c == '"' then  -- String
+                        local value = {}
+                        local i_start = i
+                        i = i + 1  -- skip opening quote
+
+                        while i <= #code do
+                            local ch = code:sub(i, i)
+
+                            if ch == '\\' then
+                                -- Escape sequence
+                                i = i + 1
+                                if i > #code then
+                                  error("Unfinished escape sequence at end of string", 2)
+                                end
+                                local next = code:sub(i, i)
+
+                                if next == 'n' then
+                                    table.insert(value, '\n')  -- Newline
+                                elseif next == 't' then
+                                    table.insert(value, '\t')  -- Tab
+                                elseif next == 'r' then
+                                    table.insert(value, '\r')  -- Carriage return
+                                elseif next == '"' then
+                                    table.insert(value, '"')   -- Escaped quote
+                                elseif next == '\\' then
+                                    table.insert(value, '\\')  -- Escaped backslash
+                                else
+                                    -- Unknown escape: treat literally (or error)
+                                    table.insert(value, '\\')
+                                    table.insert(value, next)
+                                end
+                                i = i + 1
+                           
+                            elseif ch == '\n' then
+                                -- Direct Newlines are whitespace even here
+                                line = line + 1
+                                choff = i  -- Reset char offset after newline
+                                i = i + 1
+                            elseif ch == '"' then
+                                -- Closing quote
+                                i = i + 1
+                                break
+                            else
+                                -- Regular character
+                                table.insert(value, ch)
+                                i = i + 1
+                            end
+                        end
+
+                        table.insert(tokens, {
+                            type = TOKENTYPE.STRING,
+                            value = table.concat(value),
+                            at = {char = i_start - choff, line = line}
+                        })
+                    elseif c:match("[a-zA-Z_]") then  -- CNAME label
+                        local label = code:match("^[_a-zA-Z][_a-zA-Z0-9]*", i)
+                        table.insert(tokens, {type = TOKENTYPE.LABEL, value = label, at = {char = i - choff, line = line}})
+                        i = i + #label
+                    elseif c:match("^[+%-*/%%=<>!&|^~:@#%.`$]+$") then  -- SNAME label symbol
+                        local sym = code:match("^[+%-*/%%=<>!&|^~:@#%.`$]+", i)
+                        table.insert(tokens, {type = TOKENTYPE.LABEL, value = sym, at = {char = i - choff, line = line}})
+                        i = i + #sym
+                    elseif c == "(" or c == "{" or c == "[" then  -- Open brackets
+                        table.insert(tokens, {
+                            type = TOKENTYPE.MEMBRANE_OPEN,
+                            value = ({["["]=1,["{"]=2,["("]=3})[c],
+                            at = {char = i - choff, line = line}})
+                        i = i + 1
+                    elseif c == ")" or c == "}" or c == "]" then  -- Close brackets
+                        table.insert(tokens, {
+                            type = TOKENTYPE.MEMBRANE_CLOSE,
+                            value = ({["]"]=1,["}"]=2,[")"]=3})[c],
+                            at = {char = i - choff, line = line}})
+                        i = i + 1
+                    elseif c == "," then
+                        table.insert(tokens, {type = TOKENTYPE.FINISH_ELEMENT, at = {char = i - choff, line = line}})
+                        i = i + 1
+                    elseif c == ";" then
+                        table.insert(tokens, {type = TOKENTYPE.FINISH_ACTION, at = {char = i - choff, line = line}})
+                        i = i + 1
+                    else
+                        error("Unexpected character: '" .. c .. "' at line:"..tostring(line)..", char:"..tostring(i - choff), 2)
+                    end
+                end
+                return tokens
+            end
+            return function (src)
+                local tokens = tokenize(src)
+                local ast, pos = parse_sequence(tokens, 1) -- this is purely just to keep pos local to parsing state
+                if pos <= #tokens then
+                    error("Parse error: extra tokens after sequence: "..tostring(pos).." "..tostring(#tokens), 2)
+                end
+                return ast
+            end
+        end)() -- returns src's AST prepared for loading into NegI state via FLESH.load (and yes, it's a function constructor)
+
+        -- manifests responsible for (manifests <> negI_representation)
+        FLESH.NegI.RootContext.parse_negi = FLESH.make.Manifest(FLESH.NegI.RootContext.Parser.state, {
+            nodes = {}, -- TODO: pull out AST from FLESH.NegI.parse into a Frame
+            parse = FLESH.NegI.parse
+        })
+
+        FLESH.NegI.depict = (function ()
+           
+        end)()
+
+        FLESH.NegI.RootContext.depict_negi = FLESH.make.Manifest(FLESH.NegI.RootContext.Depictor.state, {
+            depictions = {},
+            --identifier = nil, -- helps with finding
+            depict = FLESH.NegI.depict,
+        })
 
         FLESH.Host = {}
+
+        --FLESH.Host.Manifests = {
+        --    mount_drivers = FLESH.make.Frame({
+        --        filesystem = FLESH.make.Frame({
+        --            pull = {},
+        --            push = {},
+        --        }),
+        --        network = FLESH.make.Frame({
+        --            pull = {},
+        --            push = {},
+        --        })
+        --    })
+        --}
+        FLESH.make.unthunk()
+
         FLESH.Host.Types = { -- while it's a mapping table, OPHANIM fundamentally disagree with lua on type existance, so for example userdata can't be capchecked
-            ["nil"] = FLESH.NegI.Manifests.gap,
+            ["nil"] = FLESH.NegI.RootContext.gap,
             boolean = FLESH.make.Manifest({
                     can = {
                         ["in"] = {call = capability_check},
@@ -1137,7 +1590,7 @@ return (function ()
                         ["~="] = {call = make_trans_op("~=")},
                         to = {
                             can = {
-                                NegIManifest = {get = FLESH.make.Artifact("return function (self) return FLESH.make.Number(self.state) end")},
+                                NegIManifest = {get = FLESH.make.ArtifactCore("return FLESH.make.Number(self.state) ")},
                     }}}
                 }}),
             number = FLESH.make.Manifest({
@@ -1193,12 +1646,12 @@ return (function ()
                         ult = {call = nil}, -- math.ult (m, n)
                         to = {
                             can = {
-                                NegIManifest = {get = FLESH.make.Artifact("return function (self) return FLESH.make.Number(self.state) end")},
-                                string = {get = FLESH.make.Artifact([[return function (self)
+                                NegIManifest = {get = FLESH.make.ArtifactCore("return FLESH.make.Number(self.state) ")},
+                                string = {get = FLESH.make.ArtifactCore([[
                                     return { -- UNFINISHED
                                         protocol = FLESH.KES:resolve(host_types.state.items[host_types.state.labels.string]).state,
                                         state = tostring(self.state)}
-                                end]])
+                                ]])
                     }}}}
                 }}),
             string = FLESH.make.Manifest({
@@ -1210,24 +1663,24 @@ return (function ()
                         ["+"] = {call = make_trans_op("..")},
                         ["=="] = {call = make_trans_op("==")},
                         ["~="] = {call = make_trans_op("~=")},
-                        format = {call = FLESH.make.Artifact([[return function (self, arg)
+                        format = {call = FLESH.make.ArtifactCore([[
                             -- check if arg is frame and go on
-                        end]])},
+                        ]])},
                         size = {get = make_trans("string.len")},
                         lower = {get = make_trans("string.lower")},
                         upper = {get = make_trans("string.upper")},
                         reverse = {get = make_trans("string.reverse")},
                         to = {
                             can = {
-                                NegIManifest = {get = FLESH.make.Artifact("return function (self) return FLESH.make.String(self.state) end")},
-                                number = {get = FLESH.make.Artifact([[return function (self)
+                                NegIManifest = {get = FLESH.make.ArtifactCore("return FLESH.make.String(self.state) ")},
+                                number = {get = FLESH.make.ArtifactCore([[
                                     return {
                                         protocol = FLESH.KES:resolve(host_types.state.items[host_types.state.labels.number]).state,
                                         state = tonumber(self.state)}
-                                end]])}}}
+                                ]])}}}
                     }
                 }}),
-            userdata = nil, -- the lua lables it userdata, but basically it's a capability wildcard that OPHANIM can't use to check against userdata instance 
+            userdata = nil, -- the lua lables it userdata, but basically it's a capability wildcard that OPHANIM can't use to check against userdata instance
             ["function"] = FLESH.make.Manifest({
                     can = {
                     ["in"] = {call = capability_check},
@@ -1236,22 +1689,22 @@ return (function ()
                     can = {
                         dump = {get = make_trans("string.dump")}
                     },
-                    call = FLESH.make.Artifact([[return function (self, arg)
+                    call = FLESH.make.ArtifactCore([[
                         local frame_p
                         return FLESH:import(self.state(table.unpack(args)))
-                    end]])
+                    ]])
                 }}),
-            thread = FLESH.make.Manifest({ -- 
+            thread = FLESH.make.Manifest({ --
                     can = {
                         ["in"] = {call = capability_check},
                         ["="] = make_host_res_init("thread")
                 },{
                     can = {
-                        close = {get = FLESH.make.Artifact([[return function (self) end]])},
-                        isyieldable = {get = FLESH.make.Artifact([[return function (self) end]])},
-                        resume = {get = FLESH.make.Artifact([[return function (self) end]])},
-                        status = {get = FLESH.make.Artifact([[return function (self) end]])},
-                        wrap = {get = FLESH.make.Artifact([[return function (self) end]])},
+                        close = {get = FLESH.make.ArtifactCore([[ ]])},
+                        isyieldable = {get = FLESH.make.ArtifactCore([[ ]])},
+                        resume = {get = FLESH.make.ArtifactCore([[ ]])},
+                        status = {get = FLESH.make.ArtifactCore([[ ]])},
+                        wrap = {get = FLESH.make.ArtifactCore([[ ]])},
                     }
                 }}),
             table = FLESH.make.Manifest({ -- this also somewhat capability wildcard, but the importer uses different protocol for table, if it's table isn't empty
@@ -1266,26 +1719,26 @@ return (function ()
                         size = {call = make_trans("#")},
                         to = {
                             can = {
-                                NegIManifest = {get = FLESH.make.Artifact("return function (self) return FLESH.make.Number(self.state) end")},
+                                NegIManifest = {get = FLESH.make.ArtifactCore("return FLESH.make.Number(self.state) ")},
                         }}
                     },
-                    call = FLESH.make.Artifact([[return function (self, arg)
+                    call = FLESH.make.ArtifactCore([[
                         -- TODO: we somehow need to check if arg is a number or a manifest
                         return FLESH:import(self[arg.state]) -- we need to chanage the intent of import, so it would use this data
-                    end]])
+                    ]])
                 }}),
             unknown = FLESH.make.Manifest({
                     can = {
                         ["in"] = {call = capability_check},
-                        ["="] = FLESH.make.Artifact([[return function (self, arg) -- UNFINISHED
+                        ["="] = FLESH.make.ArtifactCore([[ -- UNFINISHED
                             return {protocol = self.state,state = arg}
-                        end]])
+                        ]])
                 },{}}),
         }
 
-        
+       
 
-        FLESH.import = (function () 
+        FLESH.import = (function ()
             local value_mapping = function (self, o)
                 return {
                     protocol = FLESH.Host.Types[type(o)].state, -- TODO: I need to rework the structure
@@ -1293,12 +1746,12 @@ return (function ()
 
             local gen_mt_protocol = function (self, mt)
                 for k,v in pairs(mt) do
-                    
+                   
                 end
             end
 
             local mapping = {
-                ["nil"] = (function () 
+                ["nil"] = (function ()
                     local instance = nil -- I should think on how I can integrate it
                     return function (self, o)
                         return instance
@@ -1385,353 +1838,32 @@ return (function ()
         xpcall -- Host
         ]]
 
-        FLESH.KES:write_entry("NegI", FLESH.make.Frame(FLESH.NegI.Manifests))
-
-        FLESH.NegI.parse = (function ()
-            local table_invert = function (t)
-                local s={}
-                for k,v in pairs(t) do
-                    s[v]=k
-                end
-                return s
-            end
-
-            -- Parser assets and constants
-            local TOKENTYPE = { -- enumeration for tokenizer
-                NUMBER = 0,
-                STRING = 1,
-                LABEL = 2,
-                MEMBRANE_OPEN = 3,
-                MEMBRANE_CLOSE = 4,
-                FINISH_ELEMENT = 5,
-                FINISH_ACTION = 6
-            }
-
-            local tokenname = table_invert(TOKENTYPE)
-
-            local AST_METADATA = function (node, pos)
-                return FLESH.make.Manifest(FLESH.NegI.Token.state,{})
-            end
-
-            local frame_gen = FLESH.make.Artifact([[return function (self)
-                            local items = self.state.items
-                            local labels = table.create and {lb=table.create(0,#items),bl=table.create(0,#items)} or {lb={},bl={}}
-                            for i,e in ipairs(items) do
-                                local ststs = FLESH.KES:stage_staged() -- we need to check if there is a `load`, couldn't come up with a better way
-                                e = FLESH:dispatch(e); e = e or FLESH.NegI.Manifests.gap -- evaluate
-                                e = FLESH:dispatch(e) -- get
-                                if FLESH.KES:stage_reserved() then
-                                    FLESH.KES:stage_fill_reserve(e) else
-                                    if ststs == FLESH.KES:stage_staged() then FLESH.KES:stage_entry(e) end end end
-                            return {
-                                protocol = FLESH.NegI.Manifests.Frame.state,
-                                state = FLESH.KES:stage_snapshot()}
-                        end]], "CreateFrame get")
-
-            -- Internal AST node creators (for parser output, I should also softcode this for evaluation reinterpretation)
-            local AST = { -- refactoring the Sequence generator for parser
-                GAP = function () 
-                    return FLESH.NegI.Manifests.gap -- we don't have anything on here
-                end,
-                NUMBER = function (value)
-                    return {
-                        protocol = FLESH.NegI.Manifests.Number.state,
-                        state = value} end,
-                STRING = function (value)
-                    return {
-                        protocol = FLESH.NegI.Manifests.String.state,
-                        state = value} end,
-                LABEL = function (name)
-                    return {
-                        protocol = FLESH.NegI.Manifests.Label.state,
-                        state = {name = name}} end,
-                FRAME = function (items) -- this one isn't a frame, but a frame constructor, that creates environment for writing, like Sequence
-                    return { -- constructor
-                        protocol = {get = frame_gen},--ref to manifest for running an evaluation (that would be Sequence or Artifact).
-                        state = {items = items}} end,
-                SEQUENCE = function (prods, creturn) -- Sequence holds quoted stuff, so we are not doing any actual construction
-                    return {
-                        protocol = FLESH.NegI.Manifests.Sequence.state,
-                        state = {prods = prods, creturn = creturn}} end,
-                MEMBRANE = function (kind, content) 
-                    return { -- TODO: rework is pending
-                        protocol = FLESH.NegI.Manifests[({"Contain", "Quote", "Make"})[kind+1]].state,
-                        state = content} end,
-                NEGOTIATION = function (lterm, rterm) -- evaluation units
-                    return {
-                        protocol = FLESH.NegI.Manifests.Negotiation.state,
-                        state = {lterm = lterm, rterm = rterm}} end
-            }
-
-            -- Internal: Recursive descent parsers (one per non-terminal)
-            local parse_term, parse_negotiation, parse_product, parse_sequence
-
-            parse_term = function(tokens, pos)
-                local tok
-                if pos <= #tokens then
-                    tok = tokens[pos]
-                    if tok.type == TOKENTYPE.MEMBRANE_OPEN then -- handle membrane: contain | quote | make
-                        local kind = tok.value
-                        local seq, new_pos = parse_sequence(tokens, pos + 1)
-                        pos = new_pos
-                        local concl = tokens[pos]
-                        if (concl == nil) then -- TODO: make this mess unified, there are a lot of repetition
-                            error(
-                                "parse_term ERROR: Expected membrane_close '"..
-                                string.sub(")}]",tok.value+1,tok.value+1)..
-                                "', but got nothing. Membrane begins "..
-                                " at line:"..tostring(tok.at.line)..
-                                ", char:"..tostring(tok.at.char), 2)
-                        elseif (concl.type ~= TOKENTYPE.MEMBRANE_CLOSE) then
-                            error(
-                                "parse_term ERROR: Expected membrane_close for some reason (probably parser bug, because it's implicitly checked), but got '"..
-                                tokenname[concl.type]..
-                                "' at line:"..tostring(concl.at.line)..
-                                ", char:"..tostring(concl.at.char), 2)
-                        elseif (concl.value ~= kind) then
-                            error(
-                                "parse_term ERROR: Bracket missmatch. Forgot to open with '"..
-                                string.sub("({[",tok.value+1,tok.value+1)..
-                                "' membrane? Expected this membrane to close with '"..
-                                string.sub(")}]",tok.value+1,tok.value+1)..
-                                "' at line:"..tostring(concl.at.line)..
-                                ", char:"..tostring(concl.at.char), 2)
-                        end
-                        return AST.MEMBRANE(kind, seq), pos + 1
-                    elseif tok.type == TOKENTYPE.NUMBER then -- handle NUMBER
-                        return AST.NUMBER(tok.value), pos + 1
-                    elseif tok.type == TOKENTYPE.STRING then -- handle ESCAPED_STRING
-                        return AST.STRING(tok.value), pos + 1
-                    elseif tok.type == TOKENTYPE.LABEL then -- handle label
-                        return AST.LABEL(tok.value), pos + 1
-                    elseif -- handle gap
-                        -- the code below generates ast_gap, to help tracking gaps inside sequences or frames
-                        -- we can throw gap only if expeted term terminated by one of those 2 tokens
-                        tok.type == TOKENTYPE.FINISH_ELEMENT or 
-                        tok.type == TOKENTYPE.FINISH_ACTION then
-                        return AST.GAP(), pos
-                    end
-                end
-                -- this could happen in cases like `blabla;` where after `;` there's eof or membrane_close
-                -- this means that there's nothing we can use to create term, but higher parse expects something
-                return nil, pos -- so while we're at it, we just tell higher up that no valid term found
-            end
-
-            parse_negotiation = function(tokens, pos) -- handle negotiation: term term //left associative 
-                local term, new_pos = parse_term(tokens, pos)
-                pos = new_pos
-                if (term == nil) then return nil, pos end
-
-                local tok = tokens[pos] -- slight optimization
-                local node = term
-                while 
-                    tok and (
-                    tok.type == TOKENTYPE.MEMBRANE_OPEN or 
-                    tok.type == TOKENTYPE.NUMBER or 
-                    tok.type == TOKENTYPE.STRING or 
-                    tok.type == TOKENTYPE.LABEL) do -- Check if next token is a term (not a delimiter)
-                    term, pos = parse_term(tokens, pos) -- previous check guarantees that parse_term won't return (nil, pos)
-                    tok = tokens[pos] -- we update tok
-                    node = AST.NEGOTIATION(node, term) -- Keep nesting leftwards
-                end
-                return node, pos
-            end
-
-            local check_token = function (tok, tt)
-                return (tok ~= nil) and tok.type == tt
-            end
-
-            parse_product = function(tokens, pos) -- handle ?product: frame | term
-                local term, new_pos = parse_negotiation(tokens, pos)
-                pos = new_pos
-                if check_token(tokens[pos], TOKENTYPE.FINISH_ELEMENT) then -- it's a frame
-                    -- there must be comma, but trailing one is optional. 
-                    -- meaning (5,) must be valid frame with 1 element,
-                    -- while (5) is just the element
-                    local items = {term}
-                    repeat
-                        pos = pos + 1
-                        term, pos = parse_negotiation(tokens, pos)
-                        if term then -- for the sake of trailing comma, there might be nil
-                            table.insert(items, term)
-                        end
-                    until not check_token(tokens[pos], TOKENTYPE.FINISH_ELEMENT)
-                    return AST.FRAME(items), pos
-                else -- it's not a frame
-                    return term, pos -- could return (nil, pos) from parse_term and thats fine
-                end
-            end
-
-            parse_sequence = function(tokens, pos) -- handle ?sequence: (product ";")* [creturn]
-                local term, new_pos = parse_product(tokens, pos)
-                pos = new_pos
-                -- we could have no sequence at all, so first thing we check if there is sequence
-                if check_token(tokens[pos], TOKENTYPE.FINISH_ACTION) then -- it's a sequence
-                    -- there must be semicolon, but trailing one sets creturn to nil. 
-                    -- meaning (5;) must be valid sequence with 1 element,
-                    -- while (5) is just the element,
-                    -- but if it's (5;5), last element conidered as return value on membrane finish
-                    local prod = {}
-                    local ret = term
-                    repeat
-                        table.insert(prod, ret)
-                        ret = nil
-                        pos = pos + 1
-                        term, pos = parse_product(tokens, pos)
-                        if term then -- sometimes there might be not vaild term after semicolon
-                            ret = term
-                        end
-                    until not check_token(tokens[pos], TOKENTYPE.FINISH_ACTION)
-                    return AST.SEQUENCE(prod, ret), pos
-                else -- it's not a sequence
-                    return term, pos -- could return (nil, pos) from parse_term and thats fine
-                end
-            end
-
-            local tokenize = function(code)
-                local tokens = {}
-                local i = 1
-                local line = 1
-                local choff = 0
-                while i <= #code do
-                    local c = code:sub(i, i)
-                    if c:match("%s") then  -- Skip whitespace
-                        if c == "\n" then 
-                            line = line + 1
-                            choff = i
-                        end
-                        i = i + 1
-                    --elseif c == "0" and code:sub(i+1,i+1):lower() == "x" then -- Number Hex (syntax sugar. Removed in favour of Ada/Smalltalk style "can" keys)
-                    --    local hex = code:match("^0x%x+", i)
-                    --    table.insert(tokens, {type = TOKENTYPE.NUMBER, value = tonumber(hex), at = {char = i - choff, line = line}})
-                    --    i = i + #hex
-                    --elseif c == "0" and code:sub(i+1,i+1):lower() == "b" then -- Number Binary
-                    --    local bin = code:match("^0b[01]+", i)
-                    --    local val = tonumber(bin:sub(3), 2)
-                    --    table.insert(tokens, {type = TOKENTYPE.NUMBER, value = val, at = {char = i - choff, line = line}})
-                    --    i = i + #bin
-                    elseif c:match("%d") then -- Number Scientific/Basic
-                        local num = code:match("^%d+%.?%d*[eE][+-]?%d+", i) or 
-                                    code:match("^%d+%.?%d*", i)
-                        table.insert(tokens, {type = TOKENTYPE.NUMBER, value = tonumber(num), at = {char = i - choff, line = line}})
-                        i = i + #num
-                    elseif c == '"' then  -- String
-                        local value = {}
-                        local i_start = i
-                        i = i + 1  -- skip opening quote
-
-                        while i <= #code do
-                            local ch = code:sub(i, i)
-
-                            if ch == '\\' then
-                                -- Escape sequence
-                                i = i + 1
-                                if i > #code then
-                                  error("Unfinished escape sequence at end of string", 2)
-                                end
-                                local next = code:sub(i, i)
-
-                                if next == 'n' then
-                                    table.insert(value, '\n')  -- Newline
-                                elseif next == 't' then
-                                    table.insert(value, '\t')  -- Tab
-                                elseif next == 'r' then
-                                    table.insert(value, '\r')  -- Carriage return
-                                elseif next == '"' then
-                                    table.insert(value, '"')   -- Escaped quote
-                                elseif next == '\\' then
-                                    table.insert(value, '\\')  -- Escaped backslash
-                                else
-                                    -- Unknown escape: treat literally (or error)
-                                    table.insert(value, '\\')
-                                    table.insert(value, next)
-                                end
-                                i = i + 1
-                            
-                            elseif ch == '\n' then
-                                -- Direct Newlines are whitespace even here
-                                line = line + 1
-                                choff = i  -- Reset char offset after newline
-                                i = i + 1
-                            elseif ch == '"' then
-                                -- Closing quote
-                                i = i + 1
-                                break
-                            else
-                                -- Regular character
-                                table.insert(value, ch)
-                                i = i + 1
-                            end
-                        end
-
-                        table.insert(tokens, {
-                            type = TOKENTYPE.STRING, 
-                            value = table.concat(value), 
-                            at = {char = i_start - choff, line = line}
-                        })
-                    elseif c:match("[a-zA-Z_]") then  -- CNAME label
-                        local label = code:match("^[_a-zA-Z][_a-zA-Z0-9]*", i)
-                        table.insert(tokens, {type = TOKENTYPE.LABEL, value = label, at = {char = i - choff, line = line}})
-                        i = i + #label
-                    elseif c:match("^[+%-*/%%=<>!&|^~:@#%.`$]+$") then  -- SNAME label symbol
-                        local sym = code:match("^[+%-*/%%=<>!&|^~:@#%.`$]+", i)
-                        table.insert(tokens, {type = TOKENTYPE.LABEL, value = sym, at = {char = i - choff, line = line}})
-                        i = i + #sym
-                    elseif c == "(" or c == "{" or c == "[" then  -- Open brackets
-                        table.insert(tokens, {
-                            type = TOKENTYPE.MEMBRANE_OPEN,
-                            value = ({["("]=0,["{"]=1,["["]=2})[c], 
-                            at = {char = i - choff, line = line}})
-                        i = i + 1
-                    elseif c == ")" or c == "}" or c == "]" then  -- Close brackets
-                        table.insert(tokens, {
-                            type = TOKENTYPE.MEMBRANE_CLOSE, 
-                            value = ({[")"]=0,["}"]=1,["]"]=2})[c], 
-                            at = {char = i - choff, line = line}})
-                        i = i + 1
-                    elseif c == "," then
-                        table.insert(tokens, {type = TOKENTYPE.FINISH_ELEMENT, at = {char = i - choff, line = line}})
-                        i = i + 1
-                    elseif c == ";" then
-                        table.insert(tokens, {type = TOKENTYPE.FINISH_ACTION, at = {char = i - choff, line = line}})
-                        i = i + 1
-                    else
-                        error("Unexpected character: '" .. c .. "' at line:"..tostring(line)..", char:"..tostring(i - choff), 2)
-                    end
-                end
-                return tokens
-            end
-            return function (src)
-                local tokens = tokenize(src)
-                local ast, pos = parse_sequence(tokens, 1)
-                if pos <= #tokens then
-                    error("Parse error: extra tokens after sequence", 2)
-                end
-                return ast
-            end 
-        end)() -- returns src's AST prepared for loading into NegI state via FLESH.load (and yes, it's a function constructor)
-
-        
+        local rcf = FLESH.make.Frame(FLESH.NegI.RootContext)
+        FLESH.KES:write_entry("NegI", rcf) -- NegI core interface
+        FLESH:do_action(rcf.protocol.can.load.get, rcf)
+        FLESH.KES:stage_commit();
 
         local manifest = { -- manifest structure reference ()
             template = {
                 protocol = { -- always table
                     can = {}, -- prio, find appropriate Label in front of manifest (maybe I should make this into frame, that depicts the environment for the label in front of it)
-                    call = nil, -- not found appropriate Label in can, do it if there is negotiation
-                    get = nil, -- not found appropriate Label in can, do it anyways with (if no call) or without negotioation. this rule exist to describle labels
                     ask = nil, -- default case for "can", can work with call but it's heavily advised to not use with call, otherwise it will cause confusion)
-                    get = nil, -- on start getting the stuff
-                    wrap = nil -- wrapping up the site
-
+                    call = nil, -- not found appropriate Label in can, do it if there is negotiation
+                    get = nil, -- not found appropriate Label in can, do it anyways with (if no call) or without negotioation. this rule exist to describle RAII
+                    wrap = nil, -- wrapping up the site
+                    -- ownership stuff
+                    res = nil, -- resource enumeration via callback
+                    fork = nil, -- triggered upon invocation inside foreign layer, used to create forks of mutable Manifests. Expected to return new Manifest
+                    lift = nil, -- triggered upon transfering Manifest into a layer that expects it
                 },
                 state = { -- internal state of manifest, could only be used by protocol it's bundled with.
-            
+           
         }}}
 
         FLESH:reset()
         return FLESH
     end
-            
+           
     return {
     _VERSION="0.0.1",
     newstate = newstate,
