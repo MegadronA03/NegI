@@ -53,7 +53,7 @@ local factorial_test = function ()
             loop : [
                 ans : ans * i;
                 i : i + 1;
-                ( pass [;ans], pass loop, pass loop,)[i <> n + 2](ans : ans, i : i, n : n)
+                pass [ ( [;ans], loop, loop,)[i <> n + 2] ] (ans : ans, i : i, n : n)
             ];
             loop (n : 5,)
         ];
