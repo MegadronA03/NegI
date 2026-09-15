@@ -44,16 +44,16 @@ local passing_test = function ()
     ][] ]])).state
 end
 local factorial_test = function ()
-    io.write("testing factorial (...):\t")
+    io.write("testing factorial (120):\t")
     return OState:dispatch(OState.NegI.parse([[ [
         NegI load;
         f : [
             ans : 1;
             i : 2;
             loop : [
-                ans : ans * 2;
+                ans : ans * i;
                 i : i + 1;
-                (pass loop, pass loop, [;ans],)[i <> n](ans : ans, i : i, n : n)
+                ( pass [;ans], pass loop, pass loop,)[i <> n + 2](ans : ans, i : i, n : n)
             ];
             loop (n : 5,)
         ];
@@ -69,7 +69,7 @@ pprint(labeling_test())
 pprint(swap_test())
 pprint(passing_test())
 pprint(factorial_test())
-print("NegI REPL v0.0.3 (Pre-Alpha)====================================")
+print("NegI REPL v0.0.4 (Pre-Alpha)====================================")
 --print("-- for help write `REPL help`")
 --print("-- for tutorial write `REPL tutorial`")
 
@@ -127,7 +127,8 @@ while running do
     e = OState:dispatch(e); e = (e ~= OState.NegI.RootContext.gap) and e or nil -- get
     OState.KES:stage_fill_reserve(e)
     OState.KES:stage_commit()
-    pprint((e or {}).state)
+    pprint.pformat((e or {}).state, {depth_limit = 6}, io.write)
+    io.write("\n")
 end
 OState.KES:pop_layer()
 -- starting to make the system alive

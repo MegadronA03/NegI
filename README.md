@@ -1,5 +1,5 @@
 # NegI 
-**Version:** 0.0.3 (PoC pre-alpha prototype)
+**Version:** 0.0.4 (PoC pre-alpha prototype)
 **Implementation status:** Updating as reference while porting to C + LLVM
 
 <div align="center">

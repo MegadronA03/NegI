@@ -144,7 +144,7 @@ return (function ()
                    
                     local frame_state = {labels = {lb={},bl={}}, bindings = {}}
                     local frame_entry = frame and function (self, b, rt)
-                        frame_state.bindings[#frame_state.bindings+1] = {delta = rt.records[#self.layers]}
+                        frame_state.bindings[#frame_state.bindings+1] = {rt.records[#self.layers]}
                         bimap_write(frame_state.labels, "bl", #frame_state.bindings, self.labels.bl[b])
                     end or function (self, b, rt) end
 
@@ -278,16 +278,18 @@ return (function ()
                     frame_state = frame_state or {labels = {lb={},bl={}}, bindings = {}}
                     local stage = self.layers[#self.layers].s
                     for _, e in ipairs(stage.e) do
-                        frame_state.bindings[#frame_state.bindings+1] = {delta = e.d}
-                        for _, name in ipairs(e.a) do bimap_write(frame_state.labels, "bl", #frame_state.bindings, name) end end
+                        local ni = #frame_state.bindings+1
+                        frame_state.bindings[ni] = {e.d}
+                        for _, name in ipairs(e.a) do bimap_write(frame_state.labels, "bl", ni, name) end end
                     return frame_state
                 end,
                 direct_snapshot = function (self, layer_id, frame_state) -- THIS IS RAW AUTHORITY THAT VOIDS SECURITY GUARANTEES
                     frame_state = frame_state or {labels = {lb={},bl={}}, bindings = {}} -- when provided, pours effects directly
                     for _,b in ipairs(self.layers[layer_id].c.ob) do
-                        frame_state.bindings[#frame_state.bindings+1] = {delta = self.bindings[b].records[#self.layers]}
+                        local ni = #frame_state.bindings+1
+                        frame_state.bindings[ni] = {self.bindings[b].records[#self.layers]}
                         if type(self.labels.bl[b]) == "string" then
-                            bimap_write(frame_state.labels, "bl", #frame_state.bindings, self.labels.bl[b]) end end
+                            bimap_write(frame_state.labels, "bl", ni, self.labels.bl[b]) end end
                     return frame_state end,
                 inner_snapshot = function (self) -- used in Frame, in order to track writes
                     return self:direct_snapshot(#self.layers)
@@ -680,11 +682,10 @@ return (function ()
             return FLESH.make.Artifact(self.state.chunk, self.state.chunkname, self.state.mode, self.state.env) ]], "Artifact can reload")
         FLESH.NegI.RootContext.Artifact.state.can.introspect.get = FLESH.make.ArtifactCore([[ ]], "Artifact can intospect")
         FLESH.NegI.RootContext.Artifact.state.call = FLESH.make.ArtifactCore([[
-            print("what the fuck???")
             --ldbg(false)
             return self.state.artifact(
-                FLESH.NegI.Intrinsics.frame_index(arg.state, "self"),
-                FLESH.NegI.Intrinsics.frame_index(arg.state, "arg")
+                FLESH.NegI.Intrinsics.frame_index(arg.state, 1),
+                FLESH.NegI.Intrinsics.frame_index(arg.state, 2)
             ) ]], "Artifact call")
 
         FLESH.make.Frame = function (t)
@@ -693,9 +694,10 @@ return (function ()
             --s.labels : BiMap<label: string, binding: number>
             --s.bindings : Array<bind: number, {parent: table, delta: number}|{delta: any}> -- for PoC it's enough, but I should later optimize it for memory, because inheriting lots of data would create lots of redundancy
             for k,v in pairs(t) do
-                s.bindings[#s.bindings+1] = {delta = v} -- we adding data not inheriting data, so there's no parent
+                local ni = #s.bindings+1
+                s.bindings[ni] = {v} -- we adding data not inheriting data, so there's no parent
                 if type(k) == "string" then -- I don't have plans on introducing numeric keys, because bindings already have these
-                    bimap_write(s.labels, "lb", k, #s.bindings) end end
+                    bimap_write(s.labels, "lb", k, ni) end end
             return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, s)
         end
 
@@ -750,10 +752,11 @@ return (function ()
         FLESH.NegI.Intrinsics = { -- shared code between Manifests for optimization reasons, because these are tightly coupled anyways
             frame_index = function (frame_state, query, skip_cache)
                 --pprint(frame_state.bindings)
-                if type(query) == "string" then 
-                    local label = query
+                local label
+                if type(query) == "string" then
+                    label = query 
                     query = frame_state.labels.lb[query] end
-                if type(query) ~= "number" then error("expected number or string", 2) end
+                if type(query) ~= "number" and type(label) ~= "string" then error("expected number or string", 2) end
                 local value = frame_state.bindings[query] -- TODO: needs rework - I need to keep track of failed attempts (missing breadcrumb of nils)
                 if value then return value[1] end -- [1] stores known search result
                 if frame_state.parent then -- major parent, this points to state, not binding table!
@@ -762,9 +765,10 @@ return (function ()
                     return r end
             end,
             frame_append = function (frame_state, data)
-                frame_state.bindings[#frame_state.bindings+1] = {data}
+                local ni = #frame_state.bindings+1
+                frame_state.bindings[ni] = {data}
                 frame_state.length = frame_state.length + 1
-                return #frame_state.bindings
+                return ni
             end,
             frame_set = function (frame_state, query, data) -- TODO: add counters for last index and, unique query entries and overall item amount 
                 if type(query) == "string" then
@@ -996,7 +1000,7 @@ return (function ()
                         load = {get = FLESH.make.ArtifactCore([[
                             local labels, bindings = self.state.labels, self.state.bindings
                             for b,e in pairs(bindings) do
-                                local sid = FLESH.KES:stage_entry(e.parent and e.parent[e.delta] or e.delta)
+                                local sid = FLESH.KES:stage_entry(e[1])
                                 --pprint(self.state)
                                 --print("load: "..(labels.bl[b] or "<anonymic "..b..">"))
                                 if (labels.bl[b]) then FLESH.KES:stage_alias(labels.bl[b], sid) end -- sometimes, user will want to load Frame inside a Frame.
