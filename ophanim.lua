@@ -55,7 +55,7 @@ return (function ()
                 -- probably reserved for parser tokens, but I might leave that up to Tokens themselves
             },
             KES = { -- "Knowledge Environment State" (considered finished, until bugs will be found)
-                layers = {{d = 1,h = {r={},i={}},s = {a={},e={},r={}},c = {ob={},bo={}},o = {}}}, -- stack of references, string names ready for free (initial layer is preloaded)
+                layers = {{d = 1,h = {r={},i={}},s = {{a={},e={},r={}}},c = {ob={},bo={}},o = {h={},r={},l={}}}}, -- stack of references, string names ready for free (initial layer is preloaded)
                 handles = { -- instead of giving out raw layer depths and introducing use after free bugs, we introduce "addresses" to relevant layers
                     lh = {},
                     hl = {}},
@@ -121,9 +121,9 @@ return (function ()
                     local l = { -- new layer data
                         d = (not_root) and (parent_depth + 1) or 1, -- new layer depth
                         h = {r={},i={}}, -- those are hidden layers (r - relevance, i - isolation)
-                        s = {a={},e={},r={}}, -- staged entries data: aliases(aka refs), entries and reserved aliases
+                        s = {{a={},e={},r={}}}, -- staged entries data: aliases(aka refs), entries and reserved aliases
                         c = {ob={},bo={}}, -- `c` is BiMap<order: Integer, bind: Integer> references relvant to this context layer
-                        o = {}} -- ownership data Map<handle,reaper> (handle is weak key(TODO: make `o` weak table), reaper is actually ah host function that was defined by Resource)
+                        o = {h={},r={},l={}}} -- ownership data: s - share handles to parent (removed in favour of `stage_stash`), h - Array<handle>, r - WeakMap<handle,reaper>
 
                     --if (#self.relevance.dl > l.d) then
                         for d = #self.relevance.dl, l.d, -1 do -- exclude all layers between parent and new layer depths via depth
@@ -137,21 +137,19 @@ return (function ()
                     if isolated then bimap_write(self.isolations, "od", #self.isolations.od+1, l.d) end -- isolated (external binding resolving, causes it to use resolving oblivious to effects from here)
                     return #self.layers -- used if Sequence will define another Sequence
                 end,
-                pop_layer = function (self, frame) -- P.S. while push and pop suggest stack structure, this isn't purely just that due to parent detours
+                pop_layer = function (self, creturn) -- P.S. while push and pop suggest stack structure, this isn't purely just that due to parent detours
                     if (#self.layers <= 0) then error("FLESH.KES:pop_layer - no layers to pop", 2) end
                     local l = self.layers[#self.layers]--; print("layer: "..tostring(#self.layers))
                     local db = self.bindings
-                   
-                    local frame_state = {labels = {lb={},bl={}}, bindings = {}}
-                    local frame_entry = frame and function (self, b, rt)
-                        frame_state.bindings[#frame_state.bindings+1] = {rt.records[#self.layers]}
-                        bimap_write(frame_state.labels, "bl", #frame_state.bindings, self.labels.bl[b])
-                    end or function (self, b, rt) end
 
-                    for h,r in pairs(l.o) do r.state.artifact(h) end -- `res` should 
+                    if creturn then -- skip lifting, if we don't have anything to lift
+                        self:lift_resource(creturn)
+                        local res = creturn.protocol and creturn.protocol.res
+                        if res then FLESH:do_action(res, creturn, FLESH.NegI.Assets.Lift) end end -- then we lookup for `r`s dependencies, just to move them together
+                    for h,r in pairs(l.o.r) do r.state.artifact(h) end
+
                     for _,b in ipairs(l.c.ob) do -- removing references from bindings
                         local rt = db[b]
-                        frame_entry(self, b, rt)
                         rt.records[#self.layers] = nil
                         if (#self.layers == rt.order.ol[#rt.order.ol]) then
                             bimap_write(rt.order, "lo", #self.layers, nil)
@@ -166,7 +164,9 @@ return (function ()
                         bimap_write(self.isolations, "od", #self.isolations.od + 1, hidden_layers.i[i]) end
 
                     self.layers[#self.layers] = nil -- removing layer
-                    return frame and frame_state or nil
+
+                    for i,e in pairs(l.o.l) do FLESH:do_action(e.l, e.m) end
+                    return creturn
                 end,
                 unquote_parent = function (self, parent_depth) -- get parent of unquotation
                     local not_root = (#self.relevance.dl > 0)
@@ -186,11 +186,21 @@ return (function ()
                         return self.layers[#self.layers].d
                     end
                 end,
-                has_resource = function (self, handle) return self.layers[#self.layers].o[handle] ~= nil end,
-                own_resource = function (self, handle, reaper) self.layers[#self.layers].o[handle] = reaper end,
-                lift_resource = function (self, handle)
-                    self.layers[#self.layers-1].o[handle] = self.layers[#self.layers].o[handle]
-                    self.layers[#self.layers].o[handle] = nil end,
+                has_resource = function (self, handle) return self.layers[#self.layers].o.r[handle] ~= nil end,
+                own_resource = function (self, handle, reaper)
+                    local lo = self.layers[#self.layers].o
+                    lo.r[handle] = reaper -- not sure about it being `nil`
+                    lo.h[#lo.h+1] = handle end,
+                lift_resource = function (self, handle) -- may be issues with `.h`
+                    local lo = self.layers[#self.layers].o
+                    local reaper = lo.r[handle]
+                    if not reaper then return end
+                    self.layers[#self.layers-1].o.r[handle] = reaper
+                    lo.r[handle] = nil
+                    if reaper == manifest_reaper then 
+                        local lift = handle.protocol and handle.protocol.lift
+                        lo.l[#lo.l+1] = {l = lift, m = handle} end
+                end,
                 get_owner_handle = function (self) end,
                 get_context = function (self) return #self.layers end, -- will be probably be deprecated
                 get_depth = function (self) return self.layers[#self.layers].d end, -- used by Membranes to memorize context for later use
@@ -215,9 +225,18 @@ return (function ()
                     end
                     return ref
                 end, -- entry writes could only happen in current context
+                stage_push = function (self)
+                    local ls = self.layers[#self.layers].s
+                    ls[#ls + 1] = {a={},e={},r={}}
+                end, -- maybe commit will remove this "layer" ?
+                stage_pop = function (self)
+                    local ls = self.layers[#self.layers].s
+                    ls[#ls] = nil
+                end,
                 stage_resolve_id = function (self, ref) return self.layers[#self.layers].s.a[ref] end,
                 stage_entry = function (self, data, stage_id) -- when `ref` is present, it updates info that references existing entry
-                    local stage = self.layers[#self.layers].s
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
                     if stage_id and stage_id > #stage.e then error("FLESH.KES:stage_entry - stage_id points to undefined entry.", 2) end
                     if stage_id then -- explicit abscense of stage_id, will make a new entry
                         stage.e[stage_id].d = data
@@ -230,7 +249,11 @@ return (function ()
                     return stage_id
                 end,
                 stage_alias = function (self, ref, stage_id)  -- when `ref` is present, it updates info that references existing entry
-                    local stage = self.layers[#self.layers].s
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
+                    if not stage then 
+                        pprint(self.layers[#self.layers].s)
+                    end
                     if stage_id and stage_id > #stage.e then error("FLESH.KES:stage_alias - stage_id points to undefined entry.", 2) end
                     if stage_id then -- explicit abscense of stage_id, will make a new entry
                         stage.e[stage_id].a[#stage.e[stage_id].a +1] = ref
@@ -242,41 +265,43 @@ return (function ()
                     return stage_id
                 end,
                 stage_staged = function (self)
-                    return #self.layers[#self.layers].s.e
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
+                    return #stage.e
                 end,
                 stage_reserved = function (self)
-                    return #self.layers[#self.layers].s.r > 0
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
+                    return #stage.r > 0
                 end,
                 stage_fill_reserve = function (self, data)
                     if (data == FLESH.NegI.RootContext.gap) then data = nil end -- somewhat hacky, but good enough for a `gap` check. Resource might not like this
-                    local stage = self.layers[#self.layers].s
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
                     for _,i in ipairs(stage.r) do self:stage_entry(data, i) end
                     stage.r = {}
                 end,
-                stage_commit = function (self) -- apply staged changes
+                stage_commit = function (self, write) -- apply staged changes
                     --print("==== commit ====")
                     --print("\tlayer:"..tostring(#self.layers))
                     --print("\tdepth:"..tostring(self.layers[#self.layers].d))
                     --print("\tisolated:"..tostring(self.isolations["do"][self.layers[#self.layers].d] ~= nil))
                     --print("\tcontent:")
                     --pprint(self.layers[#self.layers].s.a)
-                    local stage = self.layers[#self.layers].s
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
+                    write = write or function () end
                     for _, e in ipairs(stage.e) do
-                        e.b = {}
                         if (#e.a > 0) then for _, name in ipairs(e.a) do
                             --print("\t+ "..name)
-                            e.b[#e.b+1] = self:write_entry(name, e.d) end
-                        else e.b[#e.b+1] = self:write_entry(nil, e.d) end end
-                    local output = self.layers[#self.layers].s
-                    self.layers[#self.layers].s = {a={},e={},r={}} -- a - aliases, e - entries, r - reserve
-                    return output -- should be a map of entry -> binding, but for now it's fine
-                end,
-                stage_clear = function (self)
-                    self.layers[#self.layers].s = {a={},e={},r={}} -- a - aliases, e - entries, r - reserve
+                            write(name, e.d) end
+                        else write(nil, e.d) end end
+                    ls[#ls] = {a={},e={},r={}} -- a - aliases, e - entries, r - reserve
                 end,
                 stage_snapshot = function (self, frame_state) -- alternate for inner_snapshot, just for the Frames
                     frame_state = frame_state or {labels = {lb={},bl={}}, bindings = {}}
-                    local stage = self.layers[#self.layers].s
+                    local ls = self.layers[#self.layers].s
+                    local stage = ls[#ls]
                     for _, e in ipairs(stage.e) do
                         local ni = #frame_state.bindings+1
                         frame_state.bindings[ni] = {e.d}
@@ -391,7 +416,7 @@ return (function ()
                             if self:intentcheck(self.NegI.RootContext.Label.state, rterm.protocol) then -- we use direct access, because this stuff will depend on furst record anyways
                                 --if (not rterm.state) then pprint(rterm) end
                                 --if rterm.state.eager then goto label_eager end -- TODO: eager label protocol or make `()` force call get (force inline?)
-                                local p = protocol.can[rterm.state.name]
+                                local p = protocol.can[rterm.state.query]
                                 if p then return self.make.Manifest(p, lterm.state) end end end -- if we don't have action, we should fall down to `ask`
                         if protocol.ask then -- `ask` action exist solely for cases when Manifest need to handle arbitrary labels, like vector axis swizzling, field "modification" (the field might be abscent) and etc
                             --print("ask?")
@@ -522,13 +547,8 @@ return (function ()
             reset = function (self) end, -- inits defaults and other stuff, I have no idea on what it should do because there is already `newstate`
         }
 
-        -- Artifact assumptions:
-        -- on call it recieves 2 manifests (tabels, not KES IDs): self, arg
-        -- on get it's just self (tables, not KES IDs)
-        -- the return should return Manifest (tables, not KES IDs)
-
-        --I need to make things clear:
-        --Inside Manifest state is opaque host resource.
+        -- Manifest state is visible only to self and the one that checked it against capability
+        -- Manifest state only mutable if it belongs to current layer and belongs to self
 
         FLESH.make = {} -- Manifest constructors
 
@@ -746,48 +766,85 @@ return (function ()
                     return FLESH:dispatch(self.state, arg)
                 end)
             ]], "Breaker"), -- not sure about clause
-            Lift = FLESH.make.ArtifactCore([[FLESH.KES:lift_resource(self.state.handle)]], "Lift") -- res passes the resource handles via temporary Resource manifest
+            Lift = FLESH.make.ArtifactCore([[
+                local h = self
+                if FLESH.KES:has_resource(h) then -- prevent halt on cyclic dependencies
+                    FLESH.KES:lift_resource(h)
+                    local res = h and h.protocol and h.protocol.res
+                    if res then FLESH:do_action(res, h, FLESH.NegI.Assets.Lift) end
+                end
+                ]], "Lift") -- res passes the resource handles via temporary Resource manifest
         }
 
         FLESH.NegI.Intrinsics = { -- shared code between Manifests for optimization reasons, because these are tightly coupled anyways
+            merge_protocols = function (p_base, p_inject) -- injection do not overwrite base clauses
+                local protocol = {
+                    can = (p_base.can or p_inject.can) and {} or nil,
+                    ask = p_base.ask or p_inject.ask,
+                    call = p_base.call or p_inject.call,
+                    get = p_base.get or p_inject.get,
+                    wrap = p_base.wrap or p_inject.wrap,
+                    fork = p_base.fork or p_inject.fork,
+                    lift = p_base.lift or p_inject.lift,
+                    res = p_base.res or p_inject.res}
+
+                for c,p in pairs(p_base.can or {}) do protocol.can[c] = p end
+                for c,p in pairs(p_inject.can or {}) do protocol.can[c] = protocol.can[c] or p end
+
+                return protocol
+            end,
             frame_index = function (frame_state, query, skip_cache)
                 --pprint(frame_state.bindings)
                 local label
+                if type(query) ~= "number" and type(query) ~= "string" then error("expected number or string", 2) end
                 if type(query) == "string" then
                     label = query 
-                    query = frame_state.labels.lb[query] end
-                if type(query) ~= "number" and type(label) ~= "string" then error("expected number or string", 2) end
-                local value = frame_state.bindings[query] -- TODO: needs rework - I need to keep track of failed attempts (missing breadcrumb of nils)
-                if value then return value[1] end -- [1] stores known search result
+                    query = frame_state.labels.lb[query] 
+                end
+                if query then 
+                    local value = frame_state.bindings[query] -- TODO: needs rework - I need to keep track of failed attempts (missing breadcrumb of nils)
+                    if value then return value[1] end end -- [1] stores known search result
                 if frame_state.parent then -- major parent, this points to state, not binding table!
                     local r = frame_index(frame_state.parent, label, true)
-                    if skip_cache then FLESH.NegI.Intrinsics.frame_setex(frame_state, label, label or query, r) end
+                    if skip_cache then FLESH.NegI.Intrinsics.frame_setex(frame_state, label, query, r) end
                     return r end
             end,
             frame_append = function (frame_state, data)
-                local ni = #frame_state.bindings+1
+                local ni = #frame_state.bindings + 1
                 frame_state.bindings[ni] = {data}
                 frame_state.length = frame_state.length + 1
                 return ni
             end,
             frame_set = function (frame_state, query, data) -- TODO: add counters for last index and, unique query entries and overall item amount 
+                if type(query) ~= "number" and type(query) ~= "string" and query ~= nil then error("expected number or string or nil at #2 arg", 2) end
                 if type(query) == "string" then
                     local label = query
                     query = frame_state.labels.lb[query]
                     if not query then 
                         query = FLESH.NegI.Intrinsics.frame_append(frame_state, data)
                         bimap_write(frame_state.labels, "lb", label, query)
-                        return query end end
-                if type(query) ~= "number" then error("expected number or string at #2 arg", 2) end
-                frame_state.bindings[query] = {data}
-                return query
+                        return query end
+                else 
+                    if not query then query = #frame_state.bindings+1 end
+                    if not (frame_state.bindings[query] and not frame_state.bindings[query][1]) then frame_state.length = frame_state.length + 1 end
+                    frame_state.bindings[query] = {data}
+                    return query
+                end
             end,
             frame_setex = function (frame_state, label, binding, data)
                 --if type(label) ~= "string" then error("expected string at #2 arg", 2) end
+                binding = binding or frame_state.labels.lb[label] or #frame_state.bindings+1
                 if type(binding) ~= "number" then error("expected number at #3 arg", 2) end
                 if type(label) == "string" then
-                    bimap_write(frame_state.labels, "lb", label, binding) end
-                frame_state.bindings[query] = {data}
+                    bimap_write(frame_state.labels, "lb", label, binding) end -- move the label to new binding
+                frame_state.bindings[binding] = {data}
+            end,
+            frame_label = function (frame_state, label, binding)
+                if type(label) == "string" then
+                    bimap_write(frame_state.labels, "lb", label, binding) end -- do note that Frame can't have more labels per binding, unlike context layers
+            end,
+            frame_getlabel = function (frame_state, label, binding)
+                return frame_state.labels.bl[binding]
             end,
             the_passer = function (self, arg) return arg end
         }
@@ -912,6 +969,7 @@ return (function ()
                                     self.state < match.state and 1 or -1)
                             end)) or FLESH.make.Error("Number can <> call: expected number, got something else")
                         ]], "Number can <> call")},
+                        
                     },
                    
                 }), -- need to make generic host agnostic number representation (maybe even Rational out of 2 BigIntegers or just BigInteger to not conflate these 2 for the compilation process)
@@ -947,31 +1005,47 @@ return (function ()
 
                     ]])
                 }), -- some hosts might have to emulate this
+            --Slot = FLESH.make.Manifest({ -- interface for Label and FrameSlot
+            --    ["in"] = {call = capability_check},
+            --    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
+            --},{
+            --    can = {
+            --        [":"] = {
+            --            get = FLESH.make.ArtifactCore([[
+            --                FLESH.KES:stage_alias(self.state.query)
+            --                return FLESH.NegI.RootContext.gap ]]),
+            --            call = FLESH.make.ArtifactCore([[
+            --                FLESH.KES:stage_alias(self.state.query)
+            --                return arg ]])},
+            --    },
+            --    get = FLESH.make.ArtifactCore([[
+            --        local 
+            --        return FLESH:do_action(self.state.place) or FLESH.NegI.RootContext.gap
+            --    ]], "Slot get")
+            --})
             Label = FLESH.make.Manifest({ -- it's job is to represent a get query from KES to load manifests
                 can = {
                     ["in"] = {call = capability_check},
                     ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }},{
-                    can = {
-                        [":"] = {
-                            get = FLESH.make.ArtifactCore([[
-                                FLESH.KES:stage_alias(self.state.name)
-                                return FLESH.NegI.RootContext.gap ]]),
-                            call = FLESH.make.ArtifactCore([[
-                                FLESH.KES:stage_alias(self.state.name)
-                                return arg ]])},
-                        name = {get = FLESH.make.ArtifactCore([[
-                            return FLESH.make.String(self.state.name)
-                        ]], "Label can name get")},
-                        resolve = {get = FLESH.make.ArtifactCore([[
-                            local m, _ = FLESH.KES:resolve(self.state.name)
-                            return m or FLESH.NegI.RootContext.gap
-                        ]], "Label can resolve get")}, -- TODO: I don't like this I want to strip can/ask on demand, this feels hacky
-                    },
-                    get = FLESH.make.ArtifactCore([[
-                        local m, _ = FLESH.KES:resolve(self.state.name)
-                        return m or FLESH.NegI.RootContext.gap
-                    ]])
+                can = {
+                    [":"] = {
+                        get = FLESH.make.ArtifactCore([[
+                            FLESH.KES:stage_alias(self.state.query)
+                            return FLESH.NegI.RootContext.gap ]]),
+                        call = FLESH.make.ArtifactCore([[
+                            FLESH.KES:stage_alias(self.state.query)
+                            return arg ]])},
+                    query = {
+                        get = FLESH.make.ArtifactCore([[
+                            return FLESH.make.String(self.state.query)
+                        ]], "Label can query get")
+                    }
+                },
+                get = FLESH.make.ArtifactCore([[
+                    local m, _ = FLESH.KES:resolve(self.state.query)
+                    return m or FLESH.NegI.RootContext.gap
+                ]], "Label get")
             }),
             Frame = FLESH.make.Manifest({
                 can = {
@@ -991,11 +1065,11 @@ return (function ()
                     ]], "Frame fork"),
                     can = {
                         ["++"] = {call = FLESH.make.ArtifactCore([[
-                            
+                            FLESH.NegI.Intrinsics.frame_append(self.state, arg)
                         ]], "Frame can ++(aka item append)")},
                         ["+"] = {call = FLESH.make.ArtifactCore([[
                             
-                        ]], "Frame can +(aka join)")},
+                        ]], "Frame can +(aka join)")}, 
                         --["*"] = {call = FLESH.make.ArtifactCore([[ ]])},
                         load = {get = FLESH.make.ArtifactCore([[
                             local labels, bindings = self.state.labels, self.state.bindings
@@ -1008,7 +1082,7 @@ return (function ()
                             return FLESH.NegI.RootContext.gap
                         ]], "Frame can load get")},
                         ["."] = {ask = FLESH.make.ArtifactCore([[
-                            return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state.name) or FLESH.NegI.RootContext.gap 
+                            return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state.query) or FLESH.NegI.RootContext.gap 
                         ]], "Frame can . ask")},
                         --["/"] = {call = FLESH.make.ArtifactCore([[
                         --    --self.state.labels
@@ -1019,7 +1093,9 @@ return (function ()
                     call = FLESH.make.ArtifactCore([[
                         local num_p = FLESH.NegI.RootContext.Number
                         local str_p = FLESH.NegI.RootContext.String
-                        if (FLESH:capcheck(num_p, arg) or FLESH:capcheck(str_p, arg)) then
+                        if (FLESH:capcheck(num_p, arg)) then
+                            return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state + 1) or FLESH.NegI.RootContext.gap
+                        elseif (FLESH:capcheck(str_p, arg)) then
                             return FLESH.NegI.Intrinsics.frame_index(self.state, arg.state) or FLESH.NegI.RootContext.gap
                         elseif (FLESH:capcheck({state = self.protocol}, arg) and arg) then -- slicing in python style
                            
@@ -1027,12 +1103,10 @@ return (function ()
 
                         end
                         return FLESH.make.Error("Frame call: expected string or number, got something else")
-                    ]], "Frame call") -- indexing with splicing
-            }),
-            FrameLabel = FLESH.make.Manifest({ -- or should this ba a Label extension?
-                
-            },{
-
+                    ]], "Frame call"), -- indexing with splicing
+                    res = FLESH.make.ArtifactCore([[
+                        for _,e in pairs(self.state.bindings) do FLESH:do_action(arg, e[1]) end
+                    ]], "Frame res") -- I think giving it nice wrapping wastes memory, if user needs, they'll do that via visitor
             }),
             Sequence = FLESH.make.Manifest({
                 can = {
@@ -1047,30 +1121,23 @@ return (function ()
                     call = FLESH.make.ArtifactCore([[
                         local prods = self.state.prods
                         local frame_p = FLESH.NegI.RootContext.Frame
-                        --local load_cmd = FLESH:dispatch(arg, FLESH.make.Manifest(FLESH.NegI.RootContext.Label.state, {name = "load"}))
+                        --local load_cmd = FLESH:dispatch(arg, FLESH.make.Manifest(FLESH.NegI.RootContext.Label.state, {query = "load"}))
                         --if load_cmd == frame_p.state.can.load then FLESH:dispatch(load_cmd) end -- technically this is a correct way, but it doesn't work for now, so...
                         local match = FLESH:capcheck(frame_p, arg, (function (m) return m end)) -- I have to hack my way in
                         FLESH.KES:push_layer(self.state.ldepth, self.state.isolate)
                         if (match ~= nil) then 
                             FLESH:dispatch(match, nil, match.protocol.can.load)
-                            FLESH.KES:stage_commit() end
+                            FLESH.KES:stage_commit(function (q,m) return FLESH.KES:write_entry(q,m) end) end
                         local r = FLESH.ESC:start(nil, (function ()
                         for i,e in ipairs(prods) do
                             e = e or FLESH.NegI.RootContext.gap
                             e = FLESH:dispatch(e); e = e or FLESH.NegI.RootContext.gap -- evaluation
                             e = FLESH:dispatch(e) -- get
                             FLESH.KES:stage_fill_reserve(e)
-                            FLESH.KES:stage_commit() end
+                            FLESH.KES:stage_commit(function (q,m) return FLESH.KES:write_entry(q,m) end) end
                         return self.state.creturn and FLESH:dispatch(self.state.creturn) -- I made sure that parser now gives AST.GAP, instead of nil, so if we get an error, it won't be because of parser
                         end))
-                        if r then
-                            FLESH.KES:lift_resource(r) -- we promote this manifest first
-                            local res = r.protocol and r.protocol.res or nil
-                            if res then FLESH:do_action(res, r, FLESH.NegI.Assets.Lift) end -- then we lookup for `r`s dependencies, just to move them together
-                            FLESH.KES:pop_layer() 
-                            local lift = r.protocol and r.protocol.lift or nil
-                            if lift then FLESH:do_action(lift, r) end -- we tell manifest that it was lifted
-                        else FLESH.KES:pop_layer() end
+                        FLESH.KES:pop_layer(r)
                         return r or FLESH.NegI.RootContext.gap
                     ]], "Sequence call"),
                     lift = FLESH.make.ArtifactCore([[ self.state.ldepth = math.min(self.state.ldepth, FLESH.KES:get_depth()) ]], "Sequnece lift")
@@ -1080,15 +1147,23 @@ return (function ()
                     ["in"] = {call = capability_check},
                     ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
                 }
-            },{ -- KES should track layer versions
+            },{
                 get = FLESH.make.ArtifactCore([[
-                    local d = (self.state.parent > FLESH.KES:get_depth()) and FLESH.KES:get_depth() or self.state.parent
-                    d = FLESH.KES:unquote_parent(d)
-                    FLESH.KES:push_layer(d, self.state.contain)
+                    FLESH.KES:push_layer(FLESH.KES:unquote_parent(self.state.parent), self.state.contain)
                     return self.state.content or FLESH.NegI.RootContext.gap
                 ]], "Quote get"),
-                wrap = FLESH.make.ArtifactCore([[ FLESH.KES:pop_layer() ]], "Quote wrap"),
+                wrap = FLESH.make.ArtifactCore([[
+                    FLESH.KES:pop_layer(self.state.content)
+                    ]], "Quote wrap"),
                 lift = FLESH.make.ArtifactCore([[ self.state.parent = math.min(self.state.parent, FLESH.KES:get_depth()) ]], "Quote lift")
+            }),
+            Eager = FLESH.make.Manifest({ -- aka (), forces first Manifest to evaluate through get
+                can = {
+                    ["in"] = {call = capability_check},
+                    ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
+                }
+            },{
+                get = FLESH.make.ArtifactCore([[return FLESH:dispatch(self.state.content) or FLESH.NegI.RootContext.gap]], "Eager get"),
             }),
             Negotiation = FLESH.make.Manifest({ -- aka jusxtaposition
                 can = {
@@ -1103,14 +1178,31 @@ return (function ()
                         return FLESH:dispatch(lt, rt) or FLESH.NegI.RootContext.gap
                     ]], "Negotiation get")
             }),
-            Function = FLESH.make.Manifest({},{}),
-            Structure = FLESH.make.Manifest({},{}),
+            Gate = FLESH.make.Manifest({
+                ["in"] = {call = capability_check},
+                ["="] = {call = FLESH.make.ArtifactCore([[ ]])} -- this lil guy expects Mold
+            },{
+
+            }),
+            Mold = FLESH.make.Manifest({ -- it checks if within specific labels manifests sitisfy protocol checks. (Should it do deep checks? I think doing shallow ones is ok and keeps it safe from halting?)
+                ["in"] = {call = capability_check},
+                ["="] = {call = FLESH.make.ArtifactCore([[ ]])}
+            },{
+                can = {
+                    cast = {call = FLESH.make.ArtifactCore([[
+                        
+                    ]], "Mold can cast call")},
+                },
+                call = FLESH.make.ArtifactCore([[
+
+                ]]), -- we check the environment with this one
+            }),
             context = FLESH.make.Manifest({
                 can = {
                     inner = {
                         can = {
                             has = {ask = FLESH.make.ArtifactCore([[
-                                return FLESH.KES:has_resource(arg.name) and FLESH.NegI.RootContext["true"] or FLESH.NegI.RootContext["false"]
+                                return FLESH.KES:has_resource(arg.query) and FLESH.NegI.RootContext["true"] or FLESH.NegI.RootContext["false"]
                             ]], "context can inner can has call")}},
                         get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, FLESH.KES:inner_snapshot()) ]], "context can inner get")},
                     outer = {get = FLESH.make.ArtifactCore([[ return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, FLESH.KES:view_snapshot(true)) ]], "context can outer get")},
@@ -1162,7 +1254,7 @@ return (function ()
                     ["."] = {ask = FLESH.make.ArtifactCore([[
                         local lsub = FLESH.make.Manifest(self.protocol, {driver = self.state.driver})
                         for i,e in ipairs(self.state.path) do lsub.state.path[i] = e end
-                        lsub.state.path[#lsub.state.path+1] = arg.state.name
+                        lsub.state.path[#lsub.state.path+1] = arg.state.query
                         return lsub
                     ]], "Mount can . ask")},
                     ["/"] = {call = FLESH.make.ArtifactCore([[
@@ -1202,7 +1294,7 @@ return (function ()
             --        
             --    ]]),
             --}),
-            manifest_reaper = FLESH.make.ArtifactCore([[]], "Manifest reaper"),
+            manifest_reaper = FLESH.make.ArtifactCore([[]], "Manifest reaper"), -- lua uses GC, so we just leak it, hoping that GC will pick it up
         }
  
         manifest_reaper.protocol = FLESH.NegI.RootContext.manifest_reaper.protocol
@@ -1229,19 +1321,27 @@ return (function ()
             local framecr_p = {get = FLESH.make.ArtifactCore([[
                             local items = self.state.items
                             local labels = table.create and {lb=table.create(0,#items),bl=table.create(0,#items)} or {lb={},bl={}}
-                            for i,e in ipairs(items) do
-                                local ststs = FLESH.KES:stage_staged() -- we need to check if there is a `load`, couldn't come up with a better way
-                                e = FLESH:dispatch(e); e = e or FLESH.NegI.RootContext.gap -- evaluate
-                                e = FLESH:dispatch(e) -- get
-                                if FLESH.KES:stage_reserved() then
-                                    FLESH.KES:stage_fill_reserve(e) else
-                                    if ststs == FLESH.KES:stage_staged() then FLESH.KES:stage_entry(e) end end end
-                           
-                            local f = FLESH.make.Manifest(
-                                FLESH.NegI.RootContext.Frame.state,
-                                FLESH.KES:stage_snapshot())
-                            if (self.state.capture) then FLESH.KES:stage_clear() end
-                            return f
+                            local frame_state = {labels = labels, bindings = {}, length = 0}
+                            local loader = function ()
+                                for i,e in ipairs(items) do
+                                    local ststs = FLESH.KES:stage_staged() -- we need to check if there is a `load`, couldn't come up with a better way
+                                    e = FLESH:dispatch(e); e = e or FLESH.NegI.RootContext.gap -- evaluate
+                                    e = FLESH:dispatch(e) -- get
+                                    if FLESH.KES:stage_reserved() then
+                                        FLESH.KES:stage_fill_reserve(e) else
+                                        if ststs == FLESH.KES:stage_staged() then FLESH.KES:stage_entry(e) end end end
+                                --return FLESH.KES:stage_snapshot()
+                            end
+
+                            if (self.state.capture) then
+                                FLESH.KES:stage_push()
+                                loader()
+                                FLESH.KES:stage_commit(function (q,m) return FLESH.NegI.Intrinsics.frame_set(frame_state, q, m) end)
+                                FLESH.KES:stage_pop()
+                                return FLESH.make.Manifest(FLESH.NegI.RootContext.Frame.state, frame_state)
+                            else
+                                loader()
+                            end
                         ]], "FrameCreate get")}
 
             local seqcr_p = {get = FLESH.make.ArtifactCore([[
@@ -1273,9 +1373,9 @@ return (function ()
                 STRING = function (value)
                     --print("e_string")
                     return FLESH.make.Manifest(FLESH.NegI.RootContext.String.state, value) end,
-                LABEL = function (name)
+                LABEL = function (query)
                     --print("e_label")
-                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Label.state, {name = name, eager = false}) end,
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Label.state, {query = query}) end,
                 FRAME = function (items) -- this one isn't a frame, but a frame constructor, that creates environment for writing, like Sequence
                     --print("e_frame")
                     return FLESH.make.Manifest(framecr_p, {items = items, capture = false}) end,
@@ -1285,6 +1385,9 @@ return (function ()
                 QUOTE = function (content)
                     --print("e_quote")
                     return FLESH.make.Manifest(quotecr_p, {content = content, isolate = false}) end,
+                EAGER = function (content)
+                    --print("e_quote")
+                    return FLESH.make.Manifest(FLESH.NegI.RootContext.Eager.state, {content = content}) end,
                 NEGOTIATION = function (lterm, rterm) -- evaluation units
                     --print("e_negotiation")
                     return FLESH.make.Manifest(FLESH.NegI.RootContext.Negotiation.state, {lterm = lterm, rterm = rterm}) end,
@@ -1332,6 +1435,7 @@ return (function ()
                                 elseif (seq.protocol == quotecr_p) then seq.state.isolate = true
                                 elseif (seq.protocol == framecr_p) then seq.state.capture = true end
                                 --elseif (seq.protocol == FLESH.NegI.RootContext.Label.state) then seq.state.eager = true end -- this needs more general way, not just this
+                                seq = AST.EAGER(seq)
                             end
                         })[kind]()
                         return seq, pos + 1
@@ -1563,21 +1667,9 @@ return (function ()
             depict = FLESH.NegI.depict,
         })
 
-        FLESH.Host = {}
-
-        --FLESH.Host.Manifests = {
-        --    mount_drivers = FLESH.make.Frame({
-        --        filesystem = FLESH.make.Frame({
-        --            pull = {},
-        --            push = {},
-        --        }),
-        --        network = FLESH.make.Frame({
-        --            pull = {},
-        --            push = {},
-        --        })
-        --    })
-        --}
         FLESH.make.unthunk()
+        
+        FLESH.Host = {}
 
         FLESH.Host.Types = { -- while it's a mapping table, OPHANIM fundamentally disagree with lua on type existance, so for example userdata can't be capchecked
             ["nil"] = FLESH.NegI.RootContext.gap,
@@ -1827,7 +1919,7 @@ return (function ()
         next -- table, userdata
         pairs -- table, userdata
         pcall -- Host
-        print -- Host (we don't have any other way to interact with lua console)
+        print -- Host (we don't have any other way to interact with lua console other than io)
         rawequal -- lua types
         rawget -- table
         rawlen -- table, string
@@ -1845,7 +1937,7 @@ return (function ()
         local rcf = FLESH.make.Frame(FLESH.NegI.RootContext)
         FLESH.KES:write_entry("NegI", rcf) -- NegI core interface
         FLESH:do_action(rcf.protocol.can.load.get, rcf)
-        FLESH.KES:stage_commit();
+        FLESH.KES:stage_commit(function (q,m) return FLESH.KES:write_entry(q,m) end);
 
         local manifest = { -- manifest structure reference ()
             template = {
@@ -1872,35 +1964,3 @@ return (function ()
     _VERSION="0.0.1",
     newstate = newstate,
 } end)()
-
---[[
-Function : Manifest = [ // "Artifact substitution in form of Sequence that expects specific arguments"
-    protocol : [
-        can : [
-            in : [call : Protocol in,],
-            = : [call : Artifact = "",] // "adds arguments, turning it into contract"
-        ],
-    ],
-    state : [
-        can : [
-            = : Artifact = "", // "assign a body"
-            arg : Artifact = "", // "get arguments"
-            ret : Artifact = "", // "get output"
-        ],
-    ]
-];
-Structure : Manifest = [ // "Mold generator to check if Frame fits in it for `what` classification properties"
-    protocol : [
-        can : [
-            in : [call : Protocol in,],
-            = : [call : Artifact = "",] // "adds Frame with protocols, turning it into struct"
-        ],
-    ],
-    state : [
-        can : [
-            in : [call : Artifact = "",], // "checks if passed Frame content matches it's own protocol template"
-            template : [get : Artifact = "",] // "get the Frame we checking against"
-        ],
-    ]
-];
-]]
