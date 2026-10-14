@@ -122,12 +122,12 @@ OState.KES:push_layer(OState.KES:get_context(),true)
 while running do
     io.write(">")
     local input = io.read()
-    local e = OState.NegI.parse(input) or OState.NegI.RootContext.gap
-    e = OState:dispatch(e); e = e or OState.NegI.RootContext.gap -- evaluation
-    e = OState:dispatch(e); e = (e ~= OState.NegI.RootContext.gap) and e or nil -- get
+    local e = OState.NegI.parse(input)
+    e = OState:dispatch(e or OState.NegI.RootContext.gap) -- evaluation
+    e = OState:dispatch(e or OState.NegI.RootContext.gap) -- aquisition for the context
     OState.KES:stage_fill_reserve(e)
-    OState.KES:stage_commit()
-    pprint.pformat((e or {}).state, {depth_limit = 6}, io.write)
+    OState.KES:stage_commit(function (q,m) return OState.KES:write_entry(q,m) end)
+    pprint.pformat((e or {}).state, {depth_limit = 3}, io.write)
     io.write("\n")
 end
 OState.KES:pop_layer()
