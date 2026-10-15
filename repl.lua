@@ -60,6 +60,17 @@ local factorial_test = function ()
         f(n : 5,)
     ][] ]])).state
 end
+local drop_test = function ()
+    io.write("testing drop (gap):\t")
+    return OState:dispatch(OState.NegI.parse([[ [
+        NegI load;
+        f : [n : 5; pass a [];];
+        a : [;n];
+        f()
+    ][] ]])).state
+end
+
+
 
 print("LOADING=========================================================")
 pprint(contain_test())
@@ -69,6 +80,7 @@ pprint(labeling_test())
 pprint(swap_test())
 pprint(passing_test())
 pprint(factorial_test())
+pprint(drop_test())
 print("NegI REPL v0.0.4 (Pre-Alpha)====================================")
 --print("-- for help write `REPL help`")
 --print("-- for tutorial write `REPL tutorial`")

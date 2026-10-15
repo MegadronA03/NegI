@@ -376,7 +376,7 @@ return (function ()
                 start = function(self, err_handler, fn, ...) -- I need to reference KES. the KES on it's own is already big enough, I'm not sure it belongs there, but I'm sure it should do layer unwinding
                     local lid = FLESH.KES:get_context()
                     local ok, result = pcall(fn, ...)
-                    if ok then return result end
+                    if ok then return result end -- we know that `fn` thing handled on it's own
                     while lid < FLESH.KES:get_context() do FLESH.KES:pop_layer() end -- rework into checkpoint and revert system, currently it's slow performance wise
                     -- result is the error thrown; if it's a registered signal, call it
                     if self.closure == result then
@@ -930,8 +930,8 @@ return (function ()
                 ["="] = FLESH.make.ArtifactCore([[]], "Constructor can =")
             }
         })
-        RootContext["//"] = FLESH.make.Manifest({
-            get = FLESH.make.ArtifactCore(" return { protocol = { get = FLESH.make.ArtifactCore(\" return arg \")}}")},{})
+        --RootContext["//"] = FLESH.make.Manifest({
+        --    get = FLESH.make.ArtifactCore(" return { protocol = { get = FLESH.make.ArtifactCore(\" return arg \")}}")},{})
         RootContext.identical = FLESH.make.Manifest({
             call = FLESH.make.ArtifactCore([[]], "identical call")
         },{}) -- not sure about the name (including `compare`). Checks Manifests by reference
@@ -1196,8 +1196,7 @@ return (function ()
                         FLESH.KES:stage_commit(function (q,m) return FLESH.KES:write_entry(q,m) end) end
                     return self.state.creturn and FLESH:dispatch(self.state.creturn) -- I made sure that parser now gives AST.GAP, instead of nil, so if we get an error, it won't be because of parser
                     end))
-                    FLESH.KES:pop_layer(r)
-                    return r or FLESH.NegI.RootContext.gap
+                    return FLESH.KES:pop_layer(r or FLESH.NegI.RootContext.gap)
                 ]], "Sequence call"),
                 lift = FLESH.make.ArtifactCore([[ self.state.ldepth = math.min(self.state.ldepth, FLESH.KES:get_depth()) ]], "Sequnece lift")
         })
